@@ -1036,6 +1036,34 @@ public static class ChatStyles
         "im in the 1v2", "trust me i got this",
         "1v4 i need info", "where they coming from",
     };
+    /// Fires the SECOND a bot becomes last-man. Different from PickClutch
+    /// which is for the post-win brag. Mood-aware split:
+    private static readonly string[] PreClutch_Neutral =
+    {
+        "im 1v{n}", "1v{n} guys", "got it", "shut", "quiet", "trade me {ref}",
+        "trying", "watch info", "where they at", "hold info pls",
+    };
+    private static readonly string[] PreClutch_Toxic =
+    {
+        "thx for nothing", "wow team", "nobody helped great", "0 trade",
+        "carrying again", "trash team", "1v{n} solo as usual", "no trade you donut",
+        "cool bait", "useless team",
+    };
+    private static readonly string[] PreClutch_Friendly =
+    {
+        "ill try", "1v{n} info pls", "stay quiet team", "watching me?",
+        "pls trade", "rooting for u", "guys quiet plz", "1v{n} got this",
+    };
+    public static string PickPreClutch(BotPersona p, int oppCount, Random rng)
+    {
+        var pool = p.Mood switch
+        {
+            Friendliness.Friendly => PreClutch_Friendly,
+            Friendliness.Hostile  => PreClutch_Toxic,
+            _                     => PreClutch_Neutral,
+        };
+        return pool[rng.Next(pool.Length)].Replace("{n}", oppCount.ToString());
+    }
     private static readonly string[] HumanChat_Reactions =
     {
         "ok",

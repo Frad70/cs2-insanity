@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.13.0";
+    public override string ModuleVersion => "0.14.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -82,6 +82,8 @@ public partial class InsanityRevive : BasePlugin
     private readonly ClutchBehavior  _clutch    = new();
     private readonly EconomyModel    _econ      = new();
     private readonly BuyPreferences  _buyPrefs  = new();
+    /// v0.14: bots that have already announced their clutch this round.
+    private readonly HashSet<int>    _preClutchAnnouncedThisRound = new();
 
     // -------- global tunables --------
     public string CurrentPreset { get; private set; } = "Insane";
@@ -1030,6 +1032,7 @@ public partial class InsanityRevive : BasePlugin
         _timeCalloutDoneThisRound = false;
         _zoneCalloutCooldown.Clear();
         _lowEnemyCallCooldown.Clear();
+        _preClutchAnnouncedThisRound.Clear();
 
         // v0.11: tilt decay + econ snapshot for both teams
         foreach (var bot in Utilities.GetPlayers())
@@ -1771,6 +1774,45 @@ public partial class InsanityRevive : BasePlugin
 
         try { _aim.Tick(); } catch { }
         try { _clutch.Refresh(); } catch { }
+
+        // v0.14: detect last-man transition → fire pre-clutch announcement
+        // (bypasses ChatSuppression once via bypassDecisions flag).
+        try
+        {
+            foreach (var p in Utilities.GetPlayers())
+            {
+                if (!p.IsValid || !p.IsBot) continue;
+                if (_preClutchAnnouncedThisRound.Contains(p.Slot)) continue;
+                if (!_clutch.IsClutching(p.Slot)) continue;
+                var st = _clutch.Get(p.Slot);
+                if (st == null) continue;
+                // Just-became-last-man: ClutchStartedAt within last 0.5s
+                if (now - st.ClutchStartedAt > 0.5f) continue;
+                _preClutchAnnouncedThisRound.Add(p.Slot);
+                if (!_botPersonas.TryGetValue(p.Slot, out var per)) continue;
+                int opp = st.OpponentsAlive;
+                // Mood-skewed probability: friendly+hostile fire more (info call / blame),
+                // neutral less (focused).
+                float baseChance = per.Mood switch
+                {
+                    Friendliness.Hostile  => 0.55f,
+                    Friendliness.Friendly => 0.40f,
+                    _                     => 0.25f,
+                };
+                if (!Roll(baseChance)) continue;
+                // Pick teammate ref for "trade me {ref}" lines (the bot who just died)
+                var refName = p.PlayerName;
+                AddTimer(0.6f + (float)_rng.NextDouble() * 1.4f, () =>
+                {
+                    if (!p.IsValid) return;
+                    var line = ChatStyles.PickPreClutch(per, opp, _rng);
+                    line = line.Replace("{ref}", refName);
+                    // Bypass ChatSuppression by writing directly via ScheduleBotChat
+                    // — Roll() suppression isn't applied since we already chose to fire.
+                    ScheduleBotChat(p, "", (_, __) => line, teamOnly: true, isToxic: per.Mood == Friendliness.Hostile);
+                });
+            }
+        } catch { }
 
         foreach (var bot in Utilities.GetPlayers())
         {
