@@ -1,6 +1,7 @@
 # Overnight session — INSANITY REVIVE charter
 
-Started 2026-04-30 ~22:40 local. Run until ~10:00 2026-05-01.
+Started 2026-04-30 ~22:40 local. Run until user returns.
+**Return code phrase:** "перекрёсток семи лучей рая". Until then — keep working.
 
 ## User mandate
 

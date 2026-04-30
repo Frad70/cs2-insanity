@@ -1,0 +1,9 @@
+User return code phrase: "перекрёсток семи лучей рая"
+
+Until that phrase appears in a user message:
+- The user is asleep / away.
+- I have full autonomy.
+- Don't wait for confirmation. Just work.
+
+When it appears:
+- Stop autonomous work, hand back control, summarize.
