@@ -10,6 +10,22 @@ public enum Talkativeness { Silent, Low, Medium, High }
 /// Demeanor — hostile vs friendly. Most are hostile/neutral; ~10% are nice teammates.
 public enum Friendliness { Hostile, Neutral, Friendly }
 
+/// Bot's gameplay archetype — affects positioning/movement decisions.
+/// Generic bots use the engine default. Archetypes pick spots and timing differently.
+public enum BotArchetype
+{
+    Generic,        // default — no override
+    Entry,          // pushes first, takes opening duels (high aim, low patience)
+    Lurker,         // off-angles, late timings, knife-out rotations
+    AwperPassive,   // long sightlines, peeks slowly, holds angles
+    AwperAggro,     // dry-peek, swing wide, pre-fires
+    Support,        // utility-first, trade-frags, hugs teammates
+    Anchor,         // site-holder, won't push, pre-aims common entry
+    IGL,            // vocal in callouts, calls strats, will rotate aggressively
+    BaitOMatic,     // hides behind teammate, frags only when teammate dies
+    HeadshotOnly,   // only aims head — high reward, lower hit %
+}
+
 public class BotPersona
 {
     public BotStyle Style { get; set; } = BotStyle.Normal;
@@ -29,6 +45,24 @@ public class BotPersona
     public float Skill { get; set; } = 1.0f;
     /// Counter for "low [zone] {n}x" callouts so prefix increments.
     public int LowCallCount { get; set; } = 0;
+
+    // --- Per-bot aim profile (driven by Skill but with random spread) ---
+    // We compute these once at persona creation so the bot has a consistent
+    // "feel" the whole match. Reseeded if the bot reconnects.
+    public float AimSnapPerTick { get; set; } = 0.30f;     // lerp aggressiveness (0..1)
+    public float AimMaxBiasDeg { get; set; } = 0.5f;       // baked-in goal jitter (deg)
+    public float AimGoalRefreshSec { get; set; } = 0.22f;  // goal lifetime (sec)
+    public float AimReactionTimeSec { get; set; } = 0.18f; // delay after spotting target
+    public float AimOvershootChance { get; set; } = 0.10f; // chance per goal-refresh
+    public float AimOvershootDeg { get; set; } = 1.5f;     // overshoot magnitude (deg)
+    public float AimTrackingNoiseDeg { get; set; } = 0.0f; // tiny per-tick wobble (deg)
+    public float AimMicroAdjustChance { get; set; } = 0.0f;// chance of mid-engage micro-correction
+    public bool  AimSpraysWell { get; set; } = false;      // pulls down on prolonged fire
+    public float AimFlickStrength { get; set; } = 1.0f;    // multiplier for big snaps to fresh enemies
+
+    // Bot's gameplay archetype — affects movement/positioning when we get there.
+    // Computed alongside aim profile so behaviors are correlated with skill.
+    public BotArchetype Archetype { get; set; } = BotArchetype.Generic;
 
     /// Last few generated lines — used for de-dup so the same phrase doesn't fire 3 times in a row
     public Queue<string> RecentLines { get; } = new();
@@ -169,7 +203,7 @@ public static class ChatStyles
         // Deaf trait: ~6%
         bool deaf = rng.NextDouble() < 0.06;
 
-        return new BotPersona
+        var p = new BotPersona
         {
             Style = s,
             Tab = tab,
@@ -181,6 +215,112 @@ public static class ChatStyles
             Skill = skill,
             IsDeaf = deaf,
         };
+
+        ApplySkillToAim(p, rng);
+        ApplyArchetype(p, rng);
+        return p;
+    }
+
+    /// Roll aim parameters based on Skill so a low-skill bot feels different from a
+    /// high-skill bot. Tuned by hand to match what MM players "look like" on radar:
+    /// low-skill bots are loose, high-skill are crisp but still imperfect.
+    public static void ApplySkillToAim(BotPersona p, Random rng)
+    {
+        float s = Math.Clamp(p.Skill, 0.40f, 1.80f);
+
+        // SnapPerTick: 0.10 (super-loose, MG/Silver feel) .. 0.55 (Global feel).
+        // Mapped piecewise so most bots cluster around 0.22..0.40.
+        float baseSnap = 0.10f + (s - 0.40f) * (0.45f / 1.40f);   // 0.10..0.55
+        float snapJit  = ((float)rng.NextDouble() - 0.5f) * 0.06f; // ±3%
+        p.AimSnapPerTick = Math.Clamp(baseSnap + snapJit, 0.06f, 0.65f);
+
+        // MaxBiasDeg: high skill → tiny consistent bias; low skill → wide jitter
+        // so even when the goal is the head, they end up shooting bodies/walls.
+        float baseBias = 2.4f - (s - 0.40f) * (2.1f / 1.40f);     // 2.4..0.30
+        float biasJit  = (float)rng.NextDouble() * 0.4f - 0.2f;    // ±0.2
+        p.AimMaxBiasDeg = Math.Clamp(baseBias + biasJit, 0.10f, 3.5f);
+
+        // GoalRefreshSec: high skill = re-pick more often (smoother tracking);
+        // low skill = stale goal (looks like they're "asleep").
+        float baseRefresh = 0.40f - (s - 0.40f) * (0.28f / 1.40f); // 0.40..0.12
+        float refreshJit  = ((float)rng.NextDouble() - 0.5f) * 0.06f;
+        p.AimGoalRefreshSec = Math.Clamp(baseRefresh + refreshJit, 0.08f, 0.55f);
+
+        // ReactionTime: low skill bots react slow (300+ms), high skill are 80-150ms.
+        float baseRT = 0.30f - (s - 0.40f) * (0.22f / 1.40f);     // 0.30..0.08
+        float rtJit  = ((float)rng.NextDouble() - 0.3f) * 0.10f;
+        p.AimReactionTimeSec = Math.Clamp(baseRT + rtJit, 0.05f, 0.50f);
+
+        // Overshoot: more common in mid-skill bots (eager but inconsistent).
+        // Pure low-skill = lazy, pure high-skill = controlled. Bell-shape.
+        float skillBell = 1.0f - Math.Abs(s - 1.05f) / 0.65f;     // peak around s=1.05
+        skillBell = Math.Clamp(skillBell, 0.0f, 1.0f);
+        p.AimOvershootChance = 0.04f + 0.18f * skillBell + (float)rng.NextDouble() * 0.05f;
+        p.AimOvershootDeg    = 1.0f + 1.5f * skillBell + (float)rng.NextDouble() * 0.6f;
+
+        // Tracking noise: per-tick mouse wobble for low-skill bots only.
+        if (s < 0.85f)
+            p.AimTrackingNoiseDeg = 0.10f + (0.85f - s) * 0.40f;  // up to 0.28°
+        else
+            p.AimTrackingNoiseDeg = 0.0f;
+
+        // Micro-adjustments: high-skill bots correct mid-engage. ~5% of bots.
+        p.AimMicroAdjustChance = (s > 1.20f) ? 0.20f + (float)rng.NextDouble() * 0.20f : 0f;
+
+        // Spray control: emerges at s>1.0
+        p.AimSpraysWell = s > 1.05f && rng.NextDouble() < 0.55;
+
+        // Flick strength: 0.4..1.4 — low-skill bots flick weakly (don't reach target).
+        p.AimFlickStrength = 0.55f + (s - 0.40f) * (0.85f / 1.40f);
+        p.AimFlickStrength += ((float)rng.NextDouble() - 0.5f) * 0.20f;
+        p.AimFlickStrength = Math.Clamp(p.AimFlickStrength, 0.35f, 1.55f);
+    }
+
+    /// Roll a gameplay archetype. Skill biases the distribution: high-skill bots
+    /// more likely to be Entry/Awper/IGL; low-skill more likely Generic/BaitOMatic.
+    public static void ApplyArchetype(BotPersona p, Random rng)
+    {
+        float s = Math.Clamp(p.Skill, 0.40f, 1.80f);
+        float roll = (float)rng.NextDouble();
+
+        // ~40% Generic regardless — keeps server feeling like a real lobby
+        if (roll < 0.40f) { p.Archetype = BotArchetype.Generic; return; }
+        roll = (roll - 0.40f) / 0.60f;
+
+        // Skill-weighted bucket. 10 archetypes; weights skill-dependent.
+        float w_entry        = 0.10f + 0.18f * (s - 0.7f);
+        float w_lurker       = 0.10f + 0.05f * (s - 0.7f);
+        float w_awperPassive = 0.07f + 0.08f * (s - 0.7f);
+        float w_awperAggro   = 0.06f + 0.10f * (s - 0.7f);
+        float w_support      = 0.16f;
+        float w_anchor       = 0.13f;
+        float w_igl          = 0.04f + 0.06f * (s - 0.7f);
+        float w_bait         = 0.18f - 0.10f * (s - 0.7f);
+        float w_headshot     = 0.05f + 0.04f * (s - 0.7f);
+        // Clamp negatives
+        var weights = new (BotArchetype, float)[]
+        {
+            (BotArchetype.Entry, Math.Max(0.02f, w_entry)),
+            (BotArchetype.Lurker, Math.Max(0.02f, w_lurker)),
+            (BotArchetype.AwperPassive, Math.Max(0.02f, w_awperPassive)),
+            (BotArchetype.AwperAggro, Math.Max(0.02f, w_awperAggro)),
+            (BotArchetype.Support, Math.Max(0.02f, w_support)),
+            (BotArchetype.Anchor, Math.Max(0.02f, w_anchor)),
+            (BotArchetype.IGL, Math.Max(0.02f, w_igl)),
+            (BotArchetype.BaitOMatic, Math.Max(0.02f, w_bait)),
+            (BotArchetype.HeadshotOnly, Math.Max(0.02f, w_headshot)),
+        };
+
+        float total = 0f;
+        foreach (var (_, w) in weights) total += w;
+        float pick = roll * total;
+        float acc = 0f;
+        foreach (var (a, w) in weights)
+        {
+            acc += w;
+            if (pick <= acc) { p.Archetype = a; return; }
+        }
+        p.Archetype = BotArchetype.Generic;
     }
 
     public static bool TargetIsRussian(string name) => HasCyrillic(name);

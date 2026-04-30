@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.7.0";
+    public override string ModuleVersion => "0.8.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + social bots: AFK, vote-kick, ragequit, GG/friendly chatter, freeze-period banter, body-block bumps with FF consequences.";
 
@@ -334,8 +334,31 @@ public class InsanityRevive : BasePlugin
         var p = e.Userid;
         if (p?.IsValid != true) return HookResult.Continue;
         if (p.IsBot && !_botPersonas.ContainsKey(p.Slot))
-            _botPersonas[p.Slot] = ChatStyles.RandomPersona(_rng, p.PlayerName);
+        {
+            var persona = ChatStyles.RandomPersona(_rng, p.PlayerName);
+            _botPersonas[p.Slot] = persona;
+            PushAimProfile(p.Slot, persona);
+        }
         return HookResult.Continue;
+    }
+
+    /// Push the persona's aim parameters into the AimController so per-bot
+    /// behavior is applied. Called whenever a persona is created or refreshed.
+    private void PushAimProfile(int slot, BotPersona persona)
+    {
+        _aim.SetProfile(slot, new AimController.AimProfile
+        {
+            SnapPerTick       = persona.AimSnapPerTick,
+            MaxBiasDeg        = persona.AimMaxBiasDeg,
+            GoalRefreshSec    = persona.AimGoalRefreshSec,
+            ReactionTimeSec   = persona.AimReactionTimeSec,
+            OvershootChance   = persona.AimOvershootChance,
+            OvershootDeg      = persona.AimOvershootDeg,
+            TrackingNoiseDeg  = persona.AimTrackingNoiseDeg,
+            MicroAdjustChance = persona.AimMicroAdjustChance,
+            SpraysWell        = persona.AimSpraysWell,
+            FlickStrength     = persona.AimFlickStrength,
+        });
     }
 
     private HookResult OnPlayerDisconnect(EventPlayerDisconnect e, GameEventInfo info)
@@ -1819,6 +1842,7 @@ public class InsanityRevive : BasePlugin
         {
             persona = ChatStyles.RandomPersona(_rng, bot.PlayerName);
             _botPersonas[bot.Slot] = persona;
+            PushAimProfile(bot.Slot, persona);
         }
         persona.TauntRussianTarget = !string.IsNullOrEmpty(subject) && ChatStyles.TargetIsRussian(subject);
 

@@ -5,10 +5,12 @@ using CounterStrikeSharp.API.Modules.Utils;
 namespace InsanityRevive;
 
 /// <summary>
-/// Smooth predictive aim. Goal-based lerp (not per-tick jitter): every ~200ms
-/// we re-pick a target spot (lead + small lateral bias) and from there the
-/// crosshair eases toward it tick-by-tick. Result on the radar: smooth tracking,
-/// no twitchy zig-zag.
+/// Smooth predictive aim with per-bot personality. Goal-based lerp (not
+/// per-tick jitter): every ~GoalRefreshSec we re-pick a target spot
+/// (lead + small lateral bias) and from there the crosshair eases toward it
+/// tick-by-tick. v0.8 — adds per-bot AimProfile so each bot feels different
+/// (low-skill: loose, lazy, jittery; high-skill: crisp, eager, occasionally
+/// overshoots, sometimes auto-corrects).
 /// </summary>
 public class AimController
 {
@@ -18,14 +20,9 @@ public class AimController
     public float ScanRadius = 4500f;
     public float FovDot = 0.18f;          // ~80° half-cone
 
-    /// 0..1 — how aggressively the crosshair eases toward the goal each tick.
-    /// Smaller = smoother / lazier; larger = snappier. We tune per-preset.
+    // Default values for bots without a registered persona profile.
     public float SnapPerTick = 0.30f;
-
-    /// Lateral bias (degrees) baked into the goal — not per-tick, so it doesn't jitter.
     public float MaxBiasDeg = 0.5f;
-
-    /// How long a goal stays fixed before we recompute it (sec). Larger = even smoother.
     public float GoalRefreshSec = 0.22f;
 
     public readonly Dictionary<int, (int targetSlot, float untilTime)> ForcedTarget = new();
@@ -33,11 +30,44 @@ public class AimController
     private readonly Random _rng = new();
     private readonly Dictionary<int, float> _leadByBot = new();
 
+    /// <summary>Per-bot aim profile snapshot. Set externally when persona is created.</summary>
+    public class AimProfile
+    {
+        public float SnapPerTick = 0.30f;
+        public float MaxBiasDeg = 0.5f;
+        public float GoalRefreshSec = 0.22f;
+        public float ReactionTimeSec = 0.18f;
+        public float OvershootChance = 0.10f;
+        public float OvershootDeg = 1.5f;
+        public float TrackingNoiseDeg = 0.0f;
+        public float MicroAdjustChance = 0.0f;
+        public bool  SpraysWell = false;
+        public float FlickStrength = 1.0f;
+    }
+    private readonly Dictionary<int, AimProfile> _profiles = new();
+
+    public void SetProfile(int slot, AimProfile p) => _profiles[slot] = p;
+
+    private AimProfile GetProfile(int slot)
+    {
+        if (_profiles.TryGetValue(slot, out var p)) return p;
+        return new AimProfile
+        {
+            SnapPerTick = SnapPerTick,
+            MaxBiasDeg = MaxBiasDeg,
+            GoalRefreshSec = GoalRefreshSec,
+        };
+    }
+
     private class Goal
     {
         public float Yaw, Pitch;
         public float Expires;
         public int TargetSlot = -1;
+        public float NoticedAt = -999f;
+        public bool Engaged = false;
+        public bool Overshot = false;
+        public float MicroAdjustAt = -1f;
     }
     private readonly Dictionary<int, Goal> _goals = new();
 
@@ -63,6 +93,7 @@ public class AimController
             var origin = pawn.AbsOrigin;
             if (origin == null) continue;
             var eyeZ = origin.Z + 64f;
+            var profile = GetProfile(bot.Slot);
 
             // ---- Resolve target: forced override OR FOV-scanned closest enemy ----
             CCSPlayerController? target = null;
@@ -107,9 +138,26 @@ public class AimController
 
             // ---- Compute / refresh goal ----
             if (!_goals.TryGetValue(bot.Slot, out var goal))
-                _goals[bot.Slot] = goal = new Goal { Expires = 0 };
+                _goals[bot.Slot] = goal = new Goal { Expires = 0, NoticedAt = now };
 
-            if (goal.Expires < now || goal.TargetSlot != target.Slot)
+            bool freshTarget = goal.TargetSlot != target.Slot;
+            if (freshTarget)
+            {
+                goal.NoticedAt = now;
+                goal.Engaged = false;
+            }
+
+            // Reaction-time gate
+            if (!goal.Engaged)
+            {
+                if (now - goal.NoticedAt < profile.ReactionTimeSec)
+                    continue;
+                goal.Engaged = true;
+                if (_rng.NextDouble() < profile.OvershootChance)
+                    goal.Overshot = true;
+            }
+
+            if (goal.Expires < now || freshTarget)
             {
                 if (!_leadByBot.TryGetValue(bot.Slot, out var lead))
                 {
@@ -143,14 +191,25 @@ public class AimController
                 float gYaw = MathF.Atan2(ddy, ddx) * 180f / MathF.PI;
                 float gPitch = -MathF.Atan2(ddz, horiz) * 180f / MathF.PI;
 
-                // small bias baked into goal (not per-tick)
-                gYaw   += ((float)_rng.NextDouble() * 2f - 1f) * MaxBiasDeg;
-                gPitch += ((float)_rng.NextDouble() * 2f - 1f) * (MaxBiasDeg * 0.6f);
+                gYaw   += ((float)_rng.NextDouble() * 2f - 1f) * profile.MaxBiasDeg;
+                gPitch += ((float)_rng.NextDouble() * 2f - 1f) * (profile.MaxBiasDeg * 0.6f);
+
+                if (goal.Overshot)
+                {
+                    var sign = (_rng.NextDouble() < 0.5) ? 1f : -1f;
+                    gYaw   += sign * profile.OvershootDeg;
+                    gPitch += sign * profile.OvershootDeg * 0.5f;
+                    goal.Overshot = false;
+                }
+
+                if (_rng.NextDouble() < profile.MicroAdjustChance)
+                    goal.MicroAdjustAt = now + 0.10f + (float)_rng.NextDouble() * 0.18f;
 
                 goal.Yaw = gYaw;
                 goal.Pitch = gPitch;
                 goal.TargetSlot = target.Slot;
-                goal.Expires = now + GoalRefreshSec + ((float)_rng.NextDouble() - 0.5f) * 0.10f;
+                goal.Expires = now + profile.GoalRefreshSec
+                              + ((float)_rng.NextDouble() - 0.5f) * 0.10f;
             }
 
             // ---- Lerp current → goal ----
@@ -159,8 +218,30 @@ public class AimController
             float curPitch = ea.X;
             float dyaw = NormalizeAngle(goal.Yaw - curYaw);
             float dpitch = goal.Pitch - curPitch;
-            ea.Y = NormalizeAngle(curYaw + dyaw * SnapPerTick);
-            ea.X = MathF.Max(-89f, MathF.Min(89f, curPitch + dpitch * SnapPerTick));
+
+            float snap = profile.SnapPerTick;
+            float angDist = MathF.Sqrt(dyaw * dyaw + dpitch * dpitch);
+            if (angDist > 8f)
+                snap *= profile.FlickStrength;
+
+            if (goal.MicroAdjustAt > 0 && now >= goal.MicroAdjustAt && angDist < 3.0f)
+            {
+                snap = MathF.Min(0.95f, snap * 2.0f);
+                goal.MicroAdjustAt = -1f;
+            }
+
+            float newYaw   = NormalizeAngle(curYaw + dyaw * snap);
+            float newPitch = MathF.Max(-89f, MathF.Min(89f, curPitch + dpitch * snap));
+
+            if (profile.TrackingNoiseDeg > 0.001f)
+            {
+                newYaw   += ((float)_rng.NextDouble() * 2f - 1f) * profile.TrackingNoiseDeg;
+                newPitch += ((float)_rng.NextDouble() * 2f - 1f) * profile.TrackingNoiseDeg * 0.6f;
+                newPitch  = MathF.Max(-89f, MathF.Min(89f, newPitch));
+            }
+
+            ea.Y = newYaw;
+            ea.X = newPitch;
         }
     }
 
@@ -171,5 +252,11 @@ public class AimController
         return a;
     }
 
-    public void Forget(int slot) { _leadByBot.Remove(slot); _goals.Remove(slot); ForcedTarget.Remove(slot); }
+    public void Forget(int slot)
+    {
+        _leadByBot.Remove(slot);
+        _goals.Remove(slot);
+        ForcedTarget.Remove(slot);
+        _profiles.Remove(slot);
+    }
 }
