@@ -1062,6 +1062,39 @@ public static class ChatStyles
         return pool[rng.Next(pool.Length)].Replace("{who}", string.IsNullOrEmpty(who) ? "u" : who);
     }
 
+    /// v0.21: dead bot in spectator mode mocking a living teammate's play.
+    /// Different from Mock_DyingTeammate which is living-mocks-dying.
+    private static readonly string[] SpecMock_Toxic =
+    {
+        "wtf is this aim", "how do u miss that", "go {z} not where u going",
+        "drop the smoke", "use ur nades????", "ofc u missed", "pls die already",
+        "playing 1v5 in spec", "watching paint dry", "ull lose ur duel",
+        "this guy is silver", "bot aim", "hes gonna die",
+        "missed everything", "wide swing nice {who}", "lmao what",
+    };
+    private static readonly string[] SpecMock_Friendly =
+    {
+        "u got this", "nice positioning", "watch corner", "behind u",
+        "1 left", "swing it", "info pls", "good luck",
+    };
+    private static readonly string[] SpecMock_Neutral =
+    {
+        "watch corner", "1 left {z}", "behind u", "info pls", "rotate",
+        "play time", "they pushing {z}", "stay alive",
+    };
+    public static string PickSpecMock(BotPersona p, string targetRef, string zone, Random rng)
+    {
+        var pool = p.Mood switch
+        {
+            Friendliness.Hostile  => SpecMock_Toxic,
+            Friendliness.Friendly => SpecMock_Friendly,
+            _                     => SpecMock_Neutral,
+        };
+        return pool[rng.Next(pool.Length)]
+            .Replace("{who}", string.IsNullOrEmpty(targetRef) ? "u" : targetRef)
+            .Replace("{z}", string.IsNullOrEmpty(zone) ? "site" : zone);
+    }
+
     public static string PickStratAck(BotPersona p, string kind, Random rng)
     {
         if (p.Mood == Friendliness.Hostile && rng.NextDouble() < 0.55)

@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.20.0";
+    public override string ModuleVersion => "0.21.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -84,6 +84,10 @@ public partial class InsanityRevive : BasePlugin
     private readonly BuyPreferences  _buyPrefs  = new();
     /// v0.14: bots that have already announced their clutch this round.
     private readonly HashSet<int>    _preClutchAnnouncedThisRound = new();
+    /// v0.21: bot death-times for spec-mock timing
+    private readonly Dictionary<int, float> _botDeathTime = new();
+    /// v0.21: dead bots that already spec-mocked this round
+    private readonly HashSet<int>    _specMockedThisRound = new();
 
     // -------- global tunables --------
     public string CurrentPreset { get; private set; } = "Insane";
@@ -636,6 +640,8 @@ public partial class InsanityRevive : BasePlugin
             bool dyingAsLastMan = teamAlive == 0;
             _decisions.OnBotDeath(victim.Slot, diedToTeammate: ffKill, dyingAsLastMan);
             _clutch.Resolve(victim.Slot, won: false);
+            // v0.21: record death-time for spec-mock pacing
+            _botDeathTime[victim.Slot] = Server.CurrentTime;
         }
         if (killer is { IsValid: true, IsBot: true } && killer != victim && !ffKill)
         {
@@ -1158,6 +1164,8 @@ public partial class InsanityRevive : BasePlugin
         _zoneCalloutCooldown.Clear();
         _lowEnemyCallCooldown.Clear();
         _preClutchAnnouncedThisRound.Clear();
+        _specMockedThisRound.Clear();
+        _botDeathTime.Clear();
 
         // v0.11: tilt decay + econ snapshot for both teams
         foreach (var bot in Utilities.GetPlayers())
@@ -1990,7 +1998,7 @@ public partial class InsanityRevive : BasePlugin
                 // Just-became-last-man: ClutchStartedAt within last 0.5s
                 if (now - st.ClutchStartedAt > 0.5f) continue;
                 _preClutchAnnouncedThisRound.Add(p.Slot);
-                if (!_botPersonas.TryGetValue(p.Slot, out var per)) continue;
+                if (!_botPersonas.TryGetValue(p.Slot, out var per)) { continue; }
                 int opp = st.OpponentsAlive;
                 // Mood-skewed probability: friendly+hostile fire more (info call / blame),
                 // neutral less (focused).
@@ -2012,6 +2020,49 @@ public partial class InsanityRevive : BasePlugin
                     // Bypass ChatSuppression by writing directly via ScheduleBotChat
                     // — Roll() suppression isn't applied since we already chose to fire.
                     ScheduleBotChat(p, "", (_, __) => line, teamOnly: true, isToxic: per.Mood == Friendliness.Hostile);
+                });
+            }
+        } catch { }
+
+        // v0.21: spec-mock — dead bot has been spectating ≥10s, may snark
+        // about a living teammate's play. 1× per dead bot per round.
+        try
+        {
+            foreach (var p in Utilities.GetPlayers())
+            {
+                if (!p.IsValid || !p.IsBot) continue;
+                if (_specMockedThisRound.Contains(p.Slot)) continue;
+                var pp = p.PlayerPawn?.Value;
+                if (pp == null) continue;
+                if (pp.LifeState == (byte)LifeState_t.LIFE_ALIVE) continue;  // alive — skip
+                if (!_botDeathTime.TryGetValue(p.Slot, out var dt)) continue;
+                float dead = now - dt;
+                if (dead < 10f || dead > 35f) continue;  // 10-35s window
+                if (!_botPersonas.TryGetValue(p.Slot, out var per)) continue;
+                // Mood-skewed chance — hostile most likely to mock
+                float chance = per.Mood switch
+                {
+                    Friendliness.Hostile  => 0.10f,
+                    Friendliness.Friendly => 0.04f,
+                    _                     => 0.05f,
+                };
+                if (!Roll(chance)) continue;
+                // Pick living teammate to target
+                var alive = Utilities.GetPlayers()
+                    .Where(t => t.IsValid && t != p && t.Team == p.Team
+                        && t.PlayerPawn?.Value?.LifeState == (byte)LifeState_t.LIFE_ALIVE)
+                    .ToList();
+                if (alive.Count == 0) continue;
+                var target = alive[_rng.Next(alive.Count)];
+                _specMockedThisRound.Add(p.Slot);
+                var refName = ChatStyles.RefName(target.PlayerName, (int)target.Team, _rng);
+                var zone = ChatStyles.PickZoneFor(Server.MapName ?? "", _rng);
+                LogBehavior("SPEC_MOCK", $"{p.PlayerName} → {target.PlayerName} mood={per.Mood}");
+                AddTimer(0.4f + (float)_rng.NextDouble() * 1.3f, () =>
+                {
+                    if (!p.IsValid) return;
+                    ScheduleBotChat(p, "", (_, __) => ChatStyles.PickSpecMock(per, refName, zone, _rng),
+                        teamOnly: true, isToxic: per.Mood == Friendliness.Hostile);
                 });
             }
         } catch { }
@@ -2289,6 +2340,7 @@ public partial class InsanityRevive : BasePlugin
 
         if (Roll(0.55f, tCaller))
         {
+            LogBehavior("IGL_STRAT", $"{tCaller.PlayerName} called {mode}");
             ScheduleBotChat(tCaller, "", picker, teamOnly: true, isToxic: false);
 
             // After 5-12 sec, mock anyone (a teammate) who didn't follow — heuristic just picks
