@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.15.0";
+    public override string ModuleVersion => "0.16.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -481,18 +481,45 @@ public partial class InsanityRevive : BasePlugin
     /// behavior is applied. Called whenever a persona is created or refreshed.
     private void PushAimProfile(int slot, BotPersona persona)
     {
+        // v0.16: apply DecisionEngine state modifiers — chad streak tightens
+        // aim; hard tilt loosens it. Real-player effect: "in the zone" vs
+        // "on tilt and missing easy ones".
+        float snap   = persona.AimSnapPerTick;
+        float bias   = persona.AimMaxBiasDeg;
+        float refresh = persona.AimGoalRefreshSec;
+        float react  = persona.AimReactionTimeSec;
+        float noise  = persona.AimTrackingNoiseDeg;
+        float flick  = persona.AimFlickStrength;
+        if (_decisions.IsOnChadStreak(slot))
+        {
+            snap    *= 1.10f;
+            bias    *= 0.80f;
+            refresh *= 0.90f;
+            react   *= 0.92f;
+            noise   *= 0.70f;
+            flick   *= 1.08f;
+        }
+        else if (_decisions.IsHardTilted(slot))
+        {
+            snap    *= 0.85f;
+            bias    *= 1.25f;
+            refresh *= 1.15f;
+            react   *= 1.15f;
+            noise   *= 1.30f;
+            flick   *= 0.92f;
+        }
         _aim.SetProfile(slot, new AimController.AimProfile
         {
-            SnapPerTick       = persona.AimSnapPerTick,
-            MaxBiasDeg        = persona.AimMaxBiasDeg,
-            GoalRefreshSec    = persona.AimGoalRefreshSec,
-            ReactionTimeSec   = persona.AimReactionTimeSec,
+            SnapPerTick       = snap,
+            MaxBiasDeg        = bias,
+            GoalRefreshSec    = refresh,
+            ReactionTimeSec   = react,
             OvershootChance   = persona.AimOvershootChance,
             OvershootDeg      = persona.AimOvershootDeg,
-            TrackingNoiseDeg  = persona.AimTrackingNoiseDeg,
+            TrackingNoiseDeg  = noise,
             MicroAdjustChance = persona.AimMicroAdjustChance,
             SpraysWell        = persona.AimSpraysWell,
-            FlickStrength     = persona.AimFlickStrength,
+            FlickStrength     = flick,
         });
     }
 
@@ -1064,6 +1091,9 @@ public partial class InsanityRevive : BasePlugin
         {
             if (!bot.IsValid || !bot.IsBot) continue;
             _decisions.OnNewRound(bot.Slot);
+            // v0.16: re-push aim profile so chad/tilt modifiers apply each round
+            if (_botPersonas.TryGetValue(bot.Slot, out var per))
+                PushAimProfile(bot.Slot, per);
         }
         _econ.SnapshotForRound(CsTeam.Terrorist);
         _econ.SnapshotForRound(CsTeam.CounterTerrorist);
