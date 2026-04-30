@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.17.0";
+    public override string ModuleVersion => "0.18.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -130,7 +130,13 @@ public partial class InsanityRevive : BasePlugin
     private float _ragequitPctPerRound  = 0.008f;  // ragequit chance any bot per round (capped by global cooldown)
     private float _pauseIdlePctPerSec   = 0.012f;  // chance per second of freeze-period banter line
     private float _pauseBaitPct         = 0.20f;   // of pause idle picks, chance it's a bait at human/teammate
-    private float _friendlyChatBoost    = 1.6f;    // talkativeness multiplier for friendly bots on nice events
+    // v0.18: removed _friendlyChatBoost (was unused after Mood-aware pools landed)
+    // v0.18: clutch refresh throttle — 5Hz instead of 33Hz (clutch state changes rarely)
+    private float _lastClutchRefreshAt = 0f;
+    /// v0.18: structured behavior log — features fire here so user can review post-hoc.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _behaviorLog = new();
+    private float _lastBehaviorFlushAt = 0f;
+    private const string BehaviorLogPath = "/home/frad70/cs2-server/insanity-revive.log";
 
     // Long-pause AFK boost — when real wall-clock between rounds is unusually long,
     // multiply next round's AFK roll. Capped at 8x so it doesn't always afk-storm.
@@ -177,6 +183,7 @@ public partial class InsanityRevive : BasePlugin
     public override void Load(bool hotReload)
     {
         Logger.LogInformation("INSANITY REVIVE v{v} loading…", ModuleVersion);
+        LogBehavior("BOOT", $"v{ModuleVersion} loaded; map={Server.MapName ?? "?"}");
 
         RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath);
         RegisterEventHandler<EventPlayerHurt>(OnPlayerHurt);
@@ -479,6 +486,27 @@ public partial class InsanityRevive : BasePlugin
 
     /// Push the persona's aim parameters into the AimController so per-bot
     /// behavior is applied. Called whenever a persona is created or refreshed.
+    /// v0.18: append a structured event to the behavior log queue.
+    /// Flushed to disk every 2s by OnTick. User reviews post-hoc.
+    private void LogBehavior(string kind, string detail)
+    {
+        try
+        {
+            _behaviorLog.Enqueue($"{DateTime.Now:HH:mm:ss} [{kind}] {detail}");
+        } catch { }
+    }
+
+    private void FlushBehaviorLog()
+    {
+        try
+        {
+            if (_behaviorLog.IsEmpty) return;
+            using var w = new System.IO.StreamWriter(BehaviorLogPath, append: true);
+            while (_behaviorLog.TryDequeue(out var line))
+                w.WriteLine(line);
+        } catch { /* best-effort */ }
+    }
+
     private void PushAimProfile(int slot, BotPersona persona)
     {
         // v0.16: apply DecisionEngine state modifiers — chad streak tightens
@@ -1314,6 +1342,7 @@ public partial class InsanityRevive : BasePlugin
             {
                 _clutch.Resolve(bot.Slot, won: true);
                 _decisions.OnClutchWon(bot.Slot);
+                LogBehavior("CLUTCH_WON", $"{bot.PlayerName} (slot {bot.Slot})");
                 // Trigger a smug clutch chat line (separate from existing GG path)
                 if (Roll(0.85f, bot))
                 {
@@ -1368,6 +1397,7 @@ public partial class InsanityRevive : BasePlugin
         if (chadCandidates.Count > 0 && _toxicChat && Roll(0.55f))
         {
             var chad = chadCandidates[_rng.Next(chadCandidates.Count)];
+            LogBehavior("CHAD_GLOAT", chad.PlayerName);
             AddTimer(1.0f + (float)_rng.NextDouble() * 1.6f, () =>
             {
                 if (!chad.IsValid) return;
@@ -1388,6 +1418,7 @@ public partial class InsanityRevive : BasePlugin
             {
                 var quitter = pool[_rng.Next(pool.Count)];
                 _lastRageQuitTime = Server.CurrentTime;
+                LogBehavior("RAGEQUIT", $"{quitter.PlayerName} tilted={(_decisions.IsHardTilted(quitter.Slot)?1:0)}");
                 ScheduleBotChat(quitter, "", (_, __) => ChatStyles.PickRageQuit(_rng), teamOnly: false, isToxic: true);
                 AddTimer(4f + (float)_rng.NextDouble() * 3f, () =>
                 {
@@ -1883,7 +1914,18 @@ public partial class InsanityRevive : BasePlugin
         var now = Server.CurrentTime;
 
         try { _aim.Tick(); } catch { }
-        try { _clutch.Refresh(); } catch { }
+        // v0.18: throttle clutch refresh to ~5Hz — state changes infrequently
+        if (now - _lastClutchRefreshAt > 0.18f)
+        {
+            _lastClutchRefreshAt = now;
+            try { _clutch.Refresh(); } catch { }
+        }
+        // v0.18: flush behavior log at most every 2s
+        if (now - _lastBehaviorFlushAt > 2.0f)
+        {
+            _lastBehaviorFlushAt = now;
+            FlushBehaviorLog();
+        }
 
         // v0.14: detect last-man transition → fire pre-clutch announcement
         // (bypasses ChatSuppression once via bypassDecisions flag).

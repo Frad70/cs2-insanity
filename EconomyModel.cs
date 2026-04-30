@@ -52,7 +52,7 @@ public class EconomyModel
     public void SnapshotForRound(CsTeam team)
     {
         var e = GetTeam(team);
-        int total = 0, equip = 0, players = 0, brokeBots = 0;
+        int total = 0, players = 0, brokeBots = 0;
         foreach (var p in Utilities.GetPlayers())
         {
             if (!p.IsValid || p.Team != team) continue;
