@@ -27,6 +27,14 @@ public class AimController
 
     public readonly Dictionary<int, (int targetSlot, float untilTime)> ForcedTarget = new();
 
+    /// <summary>v0.10: per-bot reaction-time override (e.g. Entry rush — 80ms fast reaction).
+    /// Cleared by host plugin when window expires.</summary>
+    public readonly Dictionary<int, float> ReactionTimeOverrideSec = new();
+
+    /// <summary>v0.10: fired when a bot acquires a NEW target (different slot from previous goal).
+    /// Args: (botSlot, targetSlot, distance). Used by host plugin for crouch-pulse / entry-rush.</summary>
+    public Action<int, int, float>? OnFreshTarget;
+
     private readonly Random _rng = new();
     private readonly Dictionary<int, float> _leadByBot = new();
 
@@ -145,12 +153,30 @@ public class AimController
             {
                 goal.NoticedAt = now;
                 goal.Engaged = false;
+
+                // v0.10: notify host plugin of fresh-target acquisition for crouch-pulse / entry-rush
+                if (OnFreshTarget != null)
+                {
+                    var tp0 = target.PlayerPawn?.Value;
+                    var tpos0 = tp0?.AbsOrigin;
+                    if (tpos0 != null)
+                    {
+                        var dx0 = tpos0.X - origin.X;
+                        var dy0 = tpos0.Y - origin.Y;
+                        var dz0 = (tpos0.Z + 56f) - eyeZ;
+                        var dist = MathF.Sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0);
+                        try { OnFreshTarget(bot.Slot, target.Slot, dist); } catch { }
+                    }
+                }
             }
 
-            // Reaction-time gate
+            // Reaction-time gate (per-bot override available)
             if (!goal.Engaged)
             {
-                if (now - goal.NoticedAt < profile.ReactionTimeSec)
+                float rt = profile.ReactionTimeSec;
+                if (ReactionTimeOverrideSec.TryGetValue(bot.Slot, out var rtOverride))
+                    rt = rtOverride;
+                if (now - goal.NoticedAt < rt)
                     continue;
                 goal.Engaged = true;
                 if (_rng.NextDouble() < profile.OvershootChance)
@@ -258,5 +284,6 @@ public class AimController
         _goals.Remove(slot);
         ForcedTarget.Remove(slot);
         _profiles.Remove(slot);
+        ReactionTimeOverrideSec.Remove(slot);
     }
 }

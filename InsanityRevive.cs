@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 namespace InsanityRevive;
 
 [CounterStrikeSharp.API.Core.Attributes.MinimumApiVersion(304)]
-public class InsanityRevive : BasePlugin
+public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
     public override string ModuleVersion => "0.10.0";
@@ -192,6 +192,10 @@ public class InsanityRevive : BasePlugin
         // 33 Hz tick — drives aim override + strafe + typing-freeze + look-force
         AddTimer(0.030f, OnTick, TimerFlags.REPEAT);
 
+        // v0.10: AimController fires this when a bot first acquires a NEW target —
+        // host plugin uses it to trigger crouch-pulse / entry-rush / crouch-jump.
+        _aim.OnFreshTarget = OnAimFreshTarget;
+
         if (!hotReload)
             ApplyPreset(CurrentPreset, announce: false);
         else
@@ -214,6 +218,9 @@ public class InsanityRevive : BasePlugin
         _lastFFChatTime.Clear(); _lastToxicChatTime.Clear(); _lastToxicChatLine.Clear();
         _killsThisRound.Clear(); _deathsThisMatch.Clear();
         _afkUntil.Clear(); _lastMovingTime.Clear(); _lastBumpTime.Clear(); _bumpsThisRound.Clear();
+        _walkUntil.Clear(); _duckUntil.Clear(); _jumpUntil.Clear(); _entryRushUntil.Clear();
+        _crouchJumpUsedThisRound.Clear(); _shoulderPeekUntil.Clear();
+        _lastHeadingYaw.Clear(); _preAimRefreshAt.Clear();
         _zoneCalloutCooldown.Clear(); _lowEnemyCallCooldown.Clear();
         Logger.LogInformation("INSANITY REVIVE unloaded.");
     }
@@ -408,6 +415,9 @@ public class InsanityRevive : BasePlugin
         _deathsThisMatch.Remove(p.Slot); _lastToxicChatTime.Remove(p.Slot); _lastToxicChatLine.Remove(p.Slot);
         var keys = _ffDamageRound.Keys.Where(k => k.v == p.Slot || k.a == p.Slot).ToList();
         foreach (var k in keys) _ffDamageRound.Remove(k);
+        _walkUntil.Remove(p.Slot); _duckUntil.Remove(p.Slot); _jumpUntil.Remove(p.Slot);
+        _entryRushUntil.Remove(p.Slot); _crouchJumpUsedThisRound.Remove(p.Slot);
+        _shoulderPeekUntil.Remove(p.Slot); _lastHeadingYaw.Remove(p.Slot); _preAimRefreshAt.Remove(p.Slot);
         _aim.Forget(p.Slot);
         return HookResult.Continue;
     }
@@ -893,6 +903,7 @@ public class InsanityRevive : BasePlugin
         _killsThisRound.Clear();
         _bumpsThisRound.Clear();
         _botDmgToTarget.Clear();
+        _crouchJumpUsedThisRound.Clear();   // v0.10 — reset 1x/round crouch-jump quota
         _firstBloodDoneThisRound = false;
         _inFreezePeriod = true;
         _grudgeTarget.Clear();
@@ -1623,18 +1634,13 @@ public class InsanityRevive : BasePlugin
                 if (_rng.NextDouble() < 0.4) ang.yaw += ((float)_rng.NextDouble() - 0.5f) * 30f;
             }
 
-            // Forced attack window (FF revenge): set Attack bit on controller buttons.
-            // Engine reads CCSPlayerController.Buttons each tick and feeds it to weapon
-            // logic — this is what makes a bot actually pull the trigger.
-            if (_attackUntil.TryGetValue(bot.Slot, out var au2) && now < au2)
-            {
-                // (Buttons setter is read-only in CSSharp 1.0.367; rely on +attack console + ms.Buttons schema)
-                try
-                {
-                    var ms2 = pawn.MovementServices;
-                    if (ms2 != null) ms2.Buttons.ButtonStates[0] |= 1UL;
-                } catch { }
-            }
+            // Forced attack window (FF revenge) + v0.10 movement-realism button pulses
+            // (walk/duck/jump). Centralised — see MovementRealism.cs.
+            ApplyButtonPulses(bot, pawn, now);
+
+            // v0.10: pre-aim + walk-pulse + shoulder-peek (buttons-only, no velocity writes).
+            if (_movementRealismEnabled)
+                MovementRealismTick(bot, pawn, now);
 
             // (Strafe-nudge velocity push removed in 0.6.6 — was the source of the
             //  random-drift bug that affected bots and humans alike.)
