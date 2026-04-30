@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.12.0";
+    public override string ModuleVersion => "0.13.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -1302,13 +1302,33 @@ public partial class InsanityRevive : BasePlugin
         // Idle banter during the post-round delay
         ScheduleFreezePeriodIdle(durationSec: 4.5f);
 
-        // Random rage-quit (very rare, capped by global cooldown)
+        // v0.13: chad-streak gloating — bots on a hot run gloat after winning rounds.
+        // 1 chad gloater per round at most (to avoid spam).
+        var chadCandidates = Utilities.GetPlayers()
+            .Where(p => p.IsValid && p.IsBot && p.Team == winner && _decisions.IsOnChadStreak(p.Slot))
+            .ToList();
+        if (chadCandidates.Count > 0 && _toxicChat && Roll(0.55f))
+        {
+            var chad = chadCandidates[_rng.Next(chadCandidates.Count)];
+            AddTimer(1.0f + (float)_rng.NextDouble() * 1.6f, () =>
+            {
+                if (!chad.IsValid) return;
+                ScheduleBotChat(chad, "", (_, __) => ChatStyles.PickStreakHype(chad.PlayerName, _rng),
+                    teamOnly: false, isToxic: true);
+            });
+        }
+
+        // v0.13: Rage-quit — prefer a HARD-TILTED bot if any. Bot's match arc
+        // earned this; not just RNG. Falls back to random pick if nobody is tilted.
         if (Server.CurrentTime - _lastRageQuitTime > 180f && Roll(_ragequitPctPerRound))
         {
             var allBots = Utilities.GetPlayers().Where(p => p.IsValid && p.IsBot).ToList();
-            if (allBots.Count > 0)
+            var tiltedBots = allBots.Where(b => _decisions.IsHardTilted(b.Slot)).ToList();
+            // 75% prefer tilted; 25% random — keeps some unpredictability
+            var pool = (tiltedBots.Count > 0 && _rng.NextDouble() < 0.75) ? tiltedBots : allBots;
+            if (pool.Count > 0)
             {
-                var quitter = allBots[_rng.Next(allBots.Count)];
+                var quitter = pool[_rng.Next(pool.Count)];
                 _lastRageQuitTime = Server.CurrentTime;
                 ScheduleBotChat(quitter, "", (_, __) => ChatStyles.PickRageQuit(_rng), teamOnly: false, isToxic: true);
                 AddTimer(4f + (float)_rng.NextDouble() * 3f, () =>
