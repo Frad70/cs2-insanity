@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.10.0";
+    public override string ModuleVersion => "0.11.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -76,6 +76,12 @@ public partial class InsanityRevive : BasePlugin
 
     private readonly Random _rng = new();
     private readonly AimController _aim = new();
+
+    // v0.11.0 — independent service modules
+    private readonly DecisionEngine  _decisions = new();
+    private readonly ClutchBehavior  _clutch    = new();
+    private readonly EconomyModel    _econ      = new();
+    private readonly BuyPreferences  _buyPrefs  = new();
 
     // -------- global tunables --------
     public string CurrentPreset { get; private set; } = "Insane";
@@ -419,6 +425,10 @@ public partial class InsanityRevive : BasePlugin
         _entryRushUntil.Remove(p.Slot); _crouchJumpUsedThisRound.Remove(p.Slot);
         _shoulderPeekUntil.Remove(p.Slot); _lastHeadingYaw.Remove(p.Slot); _preAimRefreshAt.Remove(p.Slot);
         _aim.Forget(p.Slot);
+        // v0.11: clean up decision/clutch/buy state
+        _decisions.Forget(p.Slot);
+        _clutch.Forget(p.Slot);
+        _buyPrefs.Forget(p.Slot);
         return HookResult.Continue;
     }
 
@@ -432,6 +442,28 @@ public partial class InsanityRevive : BasePlugin
             _deathsThisMatch.TryGetValue(victim.Slot, out var d);
             _deathsThisMatch[victim.Slot] = d + 1;
             // reset killer's per-round count contribution? no — kill streak counted on attacker side
+        }
+
+        // v0.11: feed DecisionEngine + ClutchBehavior with the death event
+        bool ffKill = killer is { IsValid: true } && victim is { IsValid: true } && killer != victim
+                      && killer.Team == victim.Team && killer.Team > CsTeam.Spectator;
+        if (victim is { IsValid: true, IsBot: true })
+        {
+            // Was victim the last one alive on their team? Check survivors AFTER this death.
+            int teamAlive = Utilities.GetPlayers().Count(p =>
+                p.IsValid && p != victim && p.Team == victim.Team
+                && p.PlayerPawn?.Value?.LifeState == (byte)LifeState_t.LIFE_ALIVE);
+            bool dyingAsLastMan = teamAlive == 0;
+            _decisions.OnBotDeath(victim.Slot, diedToTeammate: ffKill, dyingAsLastMan);
+            _clutch.Resolve(victim.Slot, won: false);
+        }
+        if (killer is { IsValid: true, IsBot: true } && killer != victim && !ffKill)
+        {
+            _decisions.OnBotKill(killer.Slot, e.Headshot, wasTeammate: false);
+        }
+        else if (killer is { IsValid: true, IsBot: true } && ffKill)
+        {
+            _decisions.OnBotKill(killer.Slot, e.Headshot, wasTeammate: true);
         }
 
         if (killer is { IsValid: true } && killer != victim && killer.IsBot)
@@ -658,6 +690,10 @@ public partial class InsanityRevive : BasePlugin
 
         // 0.7: Track damage by BOT to ENEMY for "low {zone}" callouts.
         // (this branch only handles same-team FF; the enemy path is below in OnPlayerHurt-Other handler)
+
+        // v0.11: feed FF taken into DecisionEngine for tilt accumulation
+        if (victim.IsBot)
+            _decisions.OnBotTookFF(victim.Slot, e.DmgHealth);
 
         // ── Physical reaction from victim bot (works for ANY teammate attacker, including humans)
         if (victim.IsBot)
@@ -912,6 +948,15 @@ public partial class InsanityRevive : BasePlugin
         _zoneCalloutCooldown.Clear();
         _lowEnemyCallCooldown.Clear();
 
+        // v0.11: tilt decay + econ snapshot for both teams
+        foreach (var bot in Utilities.GetPlayers())
+        {
+            if (!bot.IsValid || !bot.IsBot) continue;
+            _decisions.OnNewRound(bot.Slot);
+        }
+        _econ.SnapshotForRound(CsTeam.Terrorist);
+        _econ.SnapshotForRound(CsTeam.CounterTerrorist);
+
         // 0.7 — first round of match: friendly bots post GL/glhf
         if (_matchRoundCount <= 1 && _toxicChat)
         {
@@ -1109,8 +1154,34 @@ public partial class InsanityRevive : BasePlugin
     {
         _inFreezePeriod = true;
         _lastRoundEndWall = Server.CurrentTime;
-        if (!_toxicChat) return HookResult.Continue;
         var winner = (CsTeam)e.Winner;
+
+        // v0.11: bump streaks + economy
+        _econ.OnRoundEnd(winner);
+        foreach (var bot in Utilities.GetPlayers())
+        {
+            if (!bot.IsValid || !bot.IsBot) continue;
+            if (bot.Team == winner)      _decisions.OnRoundWonForBot(bot.Slot);
+            else if (bot.Team > CsTeam.Spectator) _decisions.OnRoundLostForBot(bot.Slot);
+            // Detect clutches that ended in our team's victory
+            if (_clutch.IsClutching(bot.Slot) && bot.Team == winner)
+            {
+                _clutch.Resolve(bot.Slot, won: true);
+                _decisions.OnClutchWon(bot.Slot);
+                // Trigger a smug clutch chat line (separate from existing GG path)
+                if (Roll(0.85f, bot))
+                {
+                    AddTimer(0.4f + (float)_rng.NextDouble() * 0.8f, () =>
+                    {
+                        if (!bot.IsValid) return;
+                        ScheduleBotChat(bot, "", (_, __) => ChatStyles.PickClutch(_rng),
+                            teamOnly: false, isToxic: true);
+                    });
+                }
+            }
+        }
+
+        if (!_toxicChat) return HookResult.Continue;
         var winT  = PickWeightedTalker(winner);
         if (winT != null && Roll(_winChatPct, winT))
             ScheduleBotChat(winT, "", ChatStyles.PickWinLine, teamOnly: false, isToxic: true);
@@ -1591,6 +1662,7 @@ public partial class InsanityRevive : BasePlugin
         var now = Server.CurrentTime;
 
         try { _aim.Tick(); } catch { }
+        try { _clutch.Refresh(); } catch { }
 
         foreach (var bot in Utilities.GetPlayers())
         {
@@ -1902,7 +1974,11 @@ public partial class InsanityRevive : BasePlugin
     private bool Roll(float pct, CCSPlayerController bot)
     {
         if (!_botPersonas.TryGetValue(bot.Slot, out var per)) return _rng.NextDouble() < pct;
-        return _rng.NextDouble() < pct * per.ChatProbabilityFactor;
+        // v0.11: combine persona base + decision-engine match-arc boost + clutch-suppression
+        float p = pct * per.ChatProbabilityFactor;
+        p *= _decisions.ChatBoost(bot.Slot, per);
+        p *= _clutch.ChatSuppression(bot.Slot);
+        return _rng.NextDouble() < p;
     }
 
     private CCSPlayerController? ClosestHearingBot(CCSPlayerController src, float maxRadius)
