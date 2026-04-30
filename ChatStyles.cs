@@ -1008,6 +1008,47 @@ public static class ChatStyles
         var pool = p.Mood == Friendliness.Hostile ? DeathPing_Toxic : DeathPing_Neutral;
         return pool[rng.Next(pool.Length)].Replace("{z}", string.IsNullOrEmpty(zone) ? "site" : zone);
     }
+
+    /// v0.17: bot ACK / dissent reply to a human teammate's strat call.
+    /// kind: "rush" / "split" / "default" / "stack" / "eco" / "force" / "fast"
+    private static readonly string[] StratAck_Friendly =
+    {
+        "k", "ok", "with u", "go", "im in", "lets go", "ill follow",
+        "y", "rg", "rgr", "lets do it", "ok ill push", "alright",
+    };
+    private static readonly string[] StratAck_Hostile =
+    {
+        "no", "ill do my own thing", "trash call", "lol no", "k whatever",
+        "nah", "ill solo lurk", "y bot", "nope", "no thx",
+    };
+    private static readonly string[] StratAck_NeutralRush =
+    {
+        "rushing", "go", "with u", "k", "im in", "rg", "go go",
+    };
+    private static readonly string[] StratAck_NeutralEco =
+    {
+        "save", "eco yeah", "k save", "saving", "rg",
+    };
+    private static readonly string[] StratAck_NeutralDefault =
+    {
+        "k slow", "ok default", "playing slow", "rg", "info first",
+    };
+
+    public static string PickStratAck(BotPersona p, string kind, Random rng)
+    {
+        if (p.Mood == Friendliness.Hostile && rng.NextDouble() < 0.55)
+            return StratAck_Hostile[rng.Next(StratAck_Hostile.Length)];
+        if (p.Mood == Friendliness.Friendly)
+            return StratAck_Friendly[rng.Next(StratAck_Friendly.Length)];
+        // Neutral — kind-specific pools
+        return kind switch
+        {
+            "rush" or "fast"   => StratAck_NeutralRush[rng.Next(StratAck_NeutralRush.Length)],
+            "eco" or "save"    => StratAck_NeutralEco[rng.Next(StratAck_NeutralEco.Length)],
+            "default" or "slow"=> StratAck_NeutralDefault[rng.Next(StratAck_NeutralDefault.Length)],
+            _                  => StratAck_Friendly[rng.Next(StratAck_Friendly.Length)],
+        };
+    }
     public static string PickFriendlyLine(Random rng)   => Friendly_Nice[rng.Next(Friendly_Nice.Length)];
     public static string PickAFKHeadsUp(Random rng)     => AFK_HeadsUp[rng.Next(AFK_HeadsUp.Length)];
     public static string PickAFKFlame(string who, Random rng) => AFK_Flame[rng.Next(AFK_Flame.Length)].Replace("{who}", who);

@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.16.0";
+    public override string ModuleVersion => "0.17.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -1562,7 +1562,62 @@ public partial class InsanityRevive : BasePlugin
                         teamOnly: false, isToxic: true);
             }
         }
+
+        // v0.17: bots ACK strategy calls from human teammate. "rush b", "split a",
+        // "default", "stack b", "save", "eco" trigger 1-2 same-team bot replies.
+        if (!sayer.IsBot && sayer.Team > CsTeam.Spectator)
+        {
+            string? stratKind = DetectStratCall(raw);
+            if (stratKind != null)
+            {
+                var teammateBots = Utilities.GetPlayers()
+                    .Where(p => p.IsValid && p.IsBot && p.Team == sayer.Team).ToList();
+                int n = Math.Min(2, teammateBots.Count);
+                for (int i = 0; i < n; i++)
+                {
+                    if (!Roll(0.55f)) continue;
+                    var b = teammateBots[_rng.Next(teammateBots.Count)];
+                    if (!_botPersonas.TryGetValue(b.Slot, out var per)) continue;
+                    AddTimer(0.6f + i * 0.5f + (float)_rng.NextDouble() * 0.7f, () =>
+                    {
+                        if (!b.IsValid) return;
+                        ScheduleBotChat(b, sayer.PlayerName,
+                            (_, __) => ChatStyles.PickStratAck(per, stratKind!, _rng),
+                            teamOnly: true, isToxic: per.Mood == Friendliness.Hostile);
+                    });
+                }
+            }
+        }
         return HookResult.Continue;
+    }
+
+    /// v0.17: classify a chat message into a "strat call" kind, or null if not one.
+    private static string? DetectStratCall(string raw)
+    {
+        // Trim down stop words
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        // Rush calls
+        if (raw.Contains("rush a") || raw.Contains("rush b") || raw.Contains("раш"))
+            return "rush";
+        // Split (typically a-site mid+long pinch)
+        if (raw.Contains("split a") || raw.Contains("split b") || raw.Contains("split"))
+            return "split";
+        // Default / slow play
+        if (raw.Contains("default") || raw.Contains("slow") || raw.Contains("default it") || raw.Contains("дефолт"))
+            return "default";
+        // Stack
+        if (raw.Contains("stack a") || raw.Contains("stack b") || raw.Contains("stack"))
+            return "stack";
+        // Eco / save
+        if (raw == "eco" || raw == "save" || raw.Contains("save round") || raw.Contains("экo") || raw.Contains("сейв"))
+            return "eco";
+        // Force buy
+        if (raw.Contains("force") || raw.Contains("force buy") || raw.Contains("форс"))
+            return "force";
+        // Fast push (less specific than rush)
+        if (raw.Contains("fast a") || raw.Contains("fast b") || raw == "go" || raw.Contains("lets go"))
+            return "fast";
+        return null;
     }
 
     private HookResult OnDecoyStarted(EventDecoyStarted e, GameEventInfo info)
