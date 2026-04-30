@@ -15,9 +15,9 @@ namespace InsanityRevive;
 public class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.8.0";
+    public override string ModuleVersion => "0.10.0";
     public override string ModuleAuthor => "frad70 + Claude";
-    public override string ModuleDescription => "Predictive aim + social bots: AFK, vote-kick, ragequit, GG/friendly chatter, freeze-period banter, body-block bumps with FF consequences.";
+    public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
     // -------- per-bot state --------
     private readonly Dictionary<int, BotPersona> _botPersonas = new();
@@ -31,6 +31,23 @@ public class InsanityRevive : BasePlugin
 
     // Active "fire button held" window per bot
     private readonly Dictionary<int, float> _attackUntil = new();
+
+    // ---- v0.10 movement realism: per-bot pulse windows for buttons ----
+    // Same pattern as _attackUntil — each tick we OR the button bit while now < until.
+    private readonly Dictionary<int, float> _walkUntil = new();        // IN_SPEED (shift-walk)
+    private readonly Dictionary<int, float> _duckUntil = new();        // IN_DUCK
+    private readonly Dictionary<int, float> _jumpUntil = new();        // IN_JUMP (single-tick crouch-jump)
+    private readonly Dictionary<int, float> _entryRushUntil = new();   // entry-fragger fast-react window
+    private readonly Dictionary<int, bool>  _crouchJumpUsedThisRound = new();
+    private readonly Dictionary<int, float> _shoulderPeekUntil = new();// brief "peek then back" window
+    private readonly Dictionary<int, float> _lastHeadingYaw = new();   // last yaw while moving
+    private readonly Dictionary<int, float> _preAimRefreshAt = new();  // throttle pre-aim updates
+
+    // CS2 button bits (PlayerControllerInput / movement service)
+    private const ulong IN_ATTACK = 1UL;
+    private const ulong IN_JUMP   = 1UL << 1;     // 2
+    private const ulong IN_DUCK   = 1UL << 2;     // 4
+    private const ulong IN_SPEED  = 1UL << 12;    // 4096 — shift-walk modifier
 
     // streaks reset per round
     private readonly Dictionary<int, int> _killsThisRound = new();
@@ -65,6 +82,7 @@ public class InsanityRevive : BasePlugin
     private bool _toxicChat = true;
     private bool _hearingEnabled = true;
     private bool _strafingEnabled = false;     // disabled in 0.6.6 — caused drift bug
+    private bool _movementRealismEnabled = true;  // v0.10 — buttons-only walk/duck/jump pulses + pre-aim
     private bool _typingTimeEnabled = true;
     private bool _wrongChatEnabled = true;
     private bool _antics = true;
@@ -133,6 +151,16 @@ public class InsanityRevive : BasePlugin
 
     private float _hearingRadiusUnits = 1100f;
 
+    // ---- v0.9: zone-callout dedup ----
+    // key = zone family ("a"/"b"/"mid"/etc) → cooldown-expiry timestamp
+    private readonly Dictionary<string, float> _zoneCalloutCooldown = new();
+    // separate for "low {who}" callouts so they don't collide with positional zone keys
+    private readonly Dictionary<int, float> _lowEnemyCallCooldown = new();   // victim.Slot → expiry
+    private float _zoneCalloutMinCooldown = 7.0f;
+    private float _zoneCalloutMaxCooldown = 12.0f;
+    private bool  _calloutsEnabled = true;
+    private bool  _timeCalloutDoneThisRound = false;
+
     public override void Load(bool hotReload)
     {
         Logger.LogInformation("INSANITY REVIVE v{v} loading…", ModuleVersion);
@@ -153,6 +181,13 @@ public class InsanityRevive : BasePlugin
         RegisterEventHandler<EventGrenadeThrown>(OnGrenadeThrown);
         RegisterEventHandler<EventDecoyStarted>(OnDecoyStarted);
         RegisterEventHandler<EventPlayerChat>(OnPlayerChat);
+        // v0.9 callout triggers
+        RegisterEventHandler<EventSmokegrenadeDetonate>(OnSmokeDetonate);
+        RegisterEventHandler<EventInfernoStartburn>(OnInfernoStart);
+        RegisterEventHandler<EventFlashbangDetonate>(OnFlashDetonate);
+        RegisterEventHandler<EventPlayerBlind>(OnPlayerBlind);
+        RegisterEventHandler<EventRoundTimeWarning>(OnRoundTimeWarning);
+        RegisterEventHandler<EventBombBegindefuse>(OnBombBeginDefuse);
 
         // 33 Hz tick — drives aim override + strafe + typing-freeze + look-force
         AddTimer(0.030f, OnTick, TimerFlags.REPEAT);
@@ -179,6 +214,7 @@ public class InsanityRevive : BasePlugin
         _lastFFChatTime.Clear(); _lastToxicChatTime.Clear(); _lastToxicChatLine.Clear();
         _killsThisRound.Clear(); _deathsThisMatch.Clear();
         _afkUntil.Clear(); _lastMovingTime.Clear(); _lastBumpTime.Clear(); _bumpsThisRound.Clear();
+        _zoneCalloutCooldown.Clear(); _lowEnemyCallCooldown.Clear();
         Logger.LogInformation("INSANITY REVIVE unloaded.");
     }
 
@@ -213,6 +249,7 @@ public class InsanityRevive : BasePlugin
         menu.AddMenuOption($"Wrong chat (global): {(_wrongChatEnabled ? "ON" : "off")}", (p, _) => Toggle(p, ref _wrongChatEnabled, "Wrong chat"));
         menu.AddMenuOption($"Hearing: {(_hearingEnabled ? "ON" : "off")}",     (p, _) => Toggle(p, ref _hearingEnabled,    "Hearing"));
         menu.AddMenuOption($"Strafing: {(_strafingEnabled ? "ON" : "off")}",   (p, _) => Toggle(p, ref _strafingEnabled,   "Strafing"));
+        menu.AddMenuOption($"Movement realism: {(_movementRealismEnabled ? "ON" : "off")}", (p, _) => Toggle(p, ref _movementRealismEnabled, "Movement realism"));
         menu.AddMenuOption($"Antics: {(_antics ? "ON" : "off")}",              (p, _) => Toggle(p, ref _antics,            "Antics"));
         menu.AddMenuOption($"Predictive aim: {(_aim.Enabled ? "ON" : "off")}", (p, _) => { _aim.Enabled = !_aim.Enabled; AnnounceToggle(p.PlayerName, "Predictive aim", _aim.Enabled); });
         MenuManager.OpenChatMenu(player, menu);
@@ -556,6 +593,27 @@ public class InsanityRevive : BasePlugin
             _botDmgToTarget[dkey] = sofar;
             _lastEngagementTime[attacker.Slot] = Server.CurrentTime;
 
+            // v0.9: "one shot {who}" / "low {who}" — fires fast (no delay) when victim drops to ≤30 HP.
+            // Per-victim cooldown so we don't spam if multiple bots damage same low target.
+            var vp0 = victim.PlayerPawn?.Value;
+            if (_calloutsEnabled && _toxicChat
+                && vp0?.IsValid == true && vp0.Health > 0 && vp0.Health <= 30)
+            {
+                var nowL = Server.CurrentTime;
+                if (!_lowEnemyCallCooldown.TryGetValue(victim.Slot, out var luntil) || nowL >= luntil)
+                {
+                    _lowEnemyCallCooldown[victim.Slot] = nowL + 6.0f;
+                    if (Roll(0.55f, attacker))
+                    {
+                        var who = victim.PlayerName ?? "him";
+                        var refWho = ChatStyles.RefName(who, (int)victim.Team, _rng);
+                        var line = ChatStyles.PickCalloutFixed(ChatStyles.Callout_OneShot, "", refWho, _rng);
+                        ScheduleCalloutChat(attacker, line, zoneKey: null,
+                            teamOnly: true, isToxic: false, responsePct: 0.25f);
+                    }
+                }
+            }
+
             // Schedule a check 1.6s later — if victim is still alive and high damage,
             // shooter calls out "low <zone> [{n}x]"
             var capturedSofar = sofar;
@@ -571,12 +629,13 @@ public class InsanityRevive : BasePlugin
                 if (capturedSofar < 65) return;
                 if (!_toxicChat) return;
                 if (!_botPersonas.TryGetValue(attacker.Slot, out var per)) return;
+                var zone = ChatStyles.PickZoneFor(Server.MapName ?? "", _rng);
+                var key = ChatStyles.ZoneKeyFor(Server.MapName ?? "", $"low {zone}");
+                if (!TryClaimZoneCall(key)) return;
                 per.LowCallCount += 1;
                 var prefix = per.LowCallCount > 1 ? $"{per.LowCallCount}x " : "";
-                var zone = ChatStyles.PickZoneFor(Server.MapName ?? "", _rng);
-                ScheduleBotChat(attacker, "",
-                    (_, __) => $"{prefix}low {zone}",
-                    teamOnly: true, isToxic: false);
+                var line = $"{prefix}low {zone}";
+                ScheduleCalloutChat(attacker, line, zoneKey: null /*already claimed*/, teamOnly: true, isToxic: false, responsePct: 0.30f);
             });
         }
 
@@ -838,6 +897,9 @@ public class InsanityRevive : BasePlugin
         _inFreezePeriod = true;
         _grudgeTarget.Clear();
         _matchRoundCount += 1;
+        _timeCalloutDoneThisRound = false;
+        _zoneCalloutCooldown.Clear();
+        _lowEnemyCallCooldown.Clear();
 
         // 0.7 — first round of match: friendly bots post GL/glhf
         if (_matchRoundCount <= 1 && _toxicChat)
@@ -1274,12 +1336,29 @@ public class InsanityRevive : BasePlugin
     private HookResult OnBombPlanted(EventBombPlanted e, GameEventInfo info)
     {
         var p = e.Userid;
+        // v0.9: read site from event (e.Site: 0=A, 1=B). CSSharp exposes it as int.
+        int siteIdx = -1;
+        try { siteIdx = e.Site; } catch { }
+        var siteName = siteIdx == 0 ? "a" : siteIdx == 1 ? "b" : (_rng.Next(2) == 0 ? "a" : "b");
+
         if (p is { IsValid: true, IsBot: true })
         {
             if (_toxicChat && Roll(_plantChatPct, p))
                 ScheduleBotChat(p, "", ChatStyles.PickPlantLine, teamOnly: true, isToxic: false);
             RadioFromBot(p, Radio_InPosition, baseChance: 0.6f);
         }
+
+        // v0.9: CT-side "PLANTED A/B" callout from an alive CT bot, dedup-gated
+        if (_calloutsEnabled && _toxicChat)
+        {
+            var ctCaller = PickIGLOrTalker(CsTeam.CounterTerrorist);
+            if (ctCaller != null && Roll(0.7f, ctCaller))
+            {
+                var line = ChatStyles.PickCalloutFixed(ChatStyles.Callout_Planted, siteName, "", _rng);
+                ScheduleCalloutChat(ctCaller, line, zoneKey: siteName, teamOnly: true, isToxic: false, responsePct: 0.40f);
+            }
+        }
+
         // CT side: a teammate may radio "get out" (defuse callout)
         var ctBots = Utilities.GetPlayers().Where(b => b.IsValid && b.IsBot && b.Team == CsTeam.CounterTerrorist).ToList();
         if (ctBots.Count > 0 && Roll(0.40f))
@@ -1298,6 +1377,24 @@ public class InsanityRevive : BasePlugin
         {
             var caller = ClosestHearingBot(src, 1100f);
             if (caller != null) RadioFromBot(caller, Radio_EnemySpot, baseChance: 1.0f);
+        }
+        // v0.9: rare zone-aware footstep chat callout (heavy dedup so it doesn't spam)
+        if (_calloutsEnabled && _toxicChat && e.Userid is { IsValid: true } src2 && !src2.IsBot && Roll(0.04f))
+        {
+            var sp = src2.PlayerPawn?.Value;
+            if (sp?.IsValid == true)
+            {
+                var pos = sp.AbsOrigin;
+                var oppTeam = src2.Team == CsTeam.Terrorist ? CsTeam.CounterTerrorist : CsTeam.Terrorist;
+                var caller2 = ClosestTeammateBot(oppTeam, pos, 1100f);
+                if (caller2 != null && Roll(0.55f, caller2))
+                {
+                    var zone = PickZoneForPosOrRandom(pos, Server.MapName ?? "");
+                    var line = ChatStyles.PickCalloutFixed(ChatStyles.Callout_Footsteps, zone, "", _rng);
+                    var key = ChatStyles.ZoneKeyFor(Server.MapName ?? "", line);
+                    ScheduleCalloutChat(caller2, line, key, teamOnly: true, isToxic: false, responsePct: 0.20f);
+                }
+            }
         }
         return HookResult.Continue;
     }
@@ -1325,6 +1422,21 @@ public class InsanityRevive : BasePlugin
         if (spos == null) return;
         const float HEARING_RADIUS = 1500f;
         var rsq = HEARING_RADIUS * HEARING_RADIUS;
+
+        // v0.9: rare "shots {z}" callout from the closest ENEMY bot if shot was from human / enemy
+        // We flip this so the team that HEARS the shooter gets the call (not the team firing).
+        if (_calloutsEnabled && _toxicChat && Roll(0.10f))
+        {
+            var oppTeam = shooter.Team == CsTeam.Terrorist ? CsTeam.CounterTerrorist : CsTeam.Terrorist;
+            var oppCaller = ClosestTeammateBot(oppTeam, spos, HEARING_RADIUS);
+            if (oppCaller != null && Roll(0.45f, oppCaller))
+            {
+                var zone = PickZoneForPosOrRandom(spos, Server.MapName ?? "");
+                var line = ChatStyles.PickCalloutFixed(ChatStyles.Callout_ShotsFired, zone, "", _rng);
+                var key = ChatStyles.ZoneKeyFor(Server.MapName ?? "", line);
+                ScheduleCalloutChat(oppCaller, line, key, teamOnly: true, isToxic: false, responsePct: 0.20f);
+            }
+        }
 
         foreach (var bot in Utilities.GetPlayers())
         {
@@ -1733,7 +1845,8 @@ public class InsanityRevive : BasePlugin
     private void RollRoundStrategy()
     {
         // pick T side strat each round; chance also picks CT positioning
-        var tCaller = PickWeightedTalker(CsTeam.Terrorist);
+        // v0.9: prefer IGL archetype if alive, else weighted talker
+        var tCaller = PickIGLOrTalker(CsTeam.Terrorist);
         if (tCaller == null) return;
         var roll = _rng.NextDouble();
         Func<BotPersona, string, string> picker;
@@ -1914,5 +2027,209 @@ public class InsanityRevive : BasePlugin
                 Server.PrintToChatAll($"{prefix}{nameColor}{bot.PlayerName}{ChatColors.Default}: {captured}");
             }
         });
+    }
+
+    // ================================================================================
+    //  v0.9.0 — Callouts (zone-aware, dedup, echo/rebuke chain, world-event triggers)
+    // ================================================================================
+
+    /// Try to claim the zone-call dedup slot for `zoneKey`. Returns true if free.
+    /// Sets a fresh cooldown of 7-12s if claimed.
+    private bool TryClaimZoneCall(string? zoneKey)
+    {
+        if (string.IsNullOrEmpty(zoneKey)) return true;
+        var now = Server.CurrentTime;
+        if (_zoneCalloutCooldown.TryGetValue(zoneKey, out var until) && now < until) return false;
+        var cd = _zoneCalloutMinCooldown + (float)_rng.NextDouble() * (_zoneCalloutMaxCooldown - _zoneCalloutMinCooldown);
+        _zoneCalloutCooldown[zoneKey] = now + cd;
+        return true;
+    }
+
+    /// Higher-level wrapper: schedules a zone-aware callout from `bot`, then rolls
+    /// an echo/question/rebuke/trade response from a teammate based on persona Mood/Tab.
+    private void ScheduleCalloutChat(CCSPlayerController bot, string lineText,
+        string? zoneKey, bool teamOnly = true, bool isToxic = false, float responsePct = 0.35f)
+    {
+        if (!_calloutsEnabled) return;
+        if (bot is null || !bot.IsValid || !bot.IsBot) return;
+        if (zoneKey != null && !TryClaimZoneCall(zoneKey)) return;
+
+        ScheduleBotChat(bot, "",
+            (_, __) => lineText,
+            teamOnly: teamOnly, isToxic: isToxic);
+
+        // Echo/question/rebuke chain — pick a teammate and roll persona response
+        if (!Roll(responsePct)) return;
+        var responder = PickWeightedTalker(bot.Team);
+        if (responder == null || responder == bot) return;
+        if (!_botPersonas.TryGetValue(responder.Slot, out var rper)) return;
+        if (rper.Tab == Talkativeness.Silent && !Roll(0.10f)) return;
+
+        // Decide response type by Mood + Tab
+        // Hostile + Tab>=Medium → rebuke (toxic); Friendly + Tab>=Low → echo/trade;
+        // Neutral or low-tab → question or echo
+        Func<string> pickerF;
+        bool toxic = false;
+        var mapName = Server.MapName ?? "";
+        var roll = _rng.NextDouble();
+        if (rper.Mood == Friendliness.Hostile && rper.Tab >= Talkativeness.Medium && roll < 0.55)
+        {
+            pickerF = () => ChatStyles.Callout_Rebuke[_rng.Next(ChatStyles.Callout_Rebuke.Length)];
+            toxic = true;
+        }
+        else if (rper.Mood == Friendliness.Friendly && rper.Tab >= Talkativeness.Low && roll < 0.55)
+        {
+            pickerF = () => roll < 0.30
+                ? ChatStyles.PickCallout(ChatStyles.Callout_Trade, mapName, "", _rng)
+                : ChatStyles.Callout_Echo[_rng.Next(ChatStyles.Callout_Echo.Length)];
+        }
+        else if (roll < 0.50)
+        {
+            pickerF = () => ChatStyles.PickCalloutFixed(ChatStyles.Callout_Question, zoneKey ?? "", "", _rng);
+        }
+        else
+        {
+            pickerF = () => ChatStyles.Callout_Echo[_rng.Next(ChatStyles.Callout_Echo.Length)];
+        }
+
+        var delay = 0.5f + (float)_rng.NextDouble() * 1.6f;
+        var responderRef = responder;
+        var line = pickerF();
+        AddTimer(delay, () =>
+        {
+            if (!responderRef.IsValid) return;
+            ScheduleBotChat(responderRef, "",
+                (_, __) => line,
+                teamOnly: teamOnly, isToxic: toxic);
+        });
+    }
+
+    /// Find the closest world zone for a position. Stub: just picks from map pool —
+    /// we don't have site centroids. For PLANTED, the engine sets m_iBombSite which
+    /// would be cleaner, but is brittle to read; the random pick at A/B is fine for chat.
+    private string PickZoneForPosOrRandom(CounterStrikeSharp.API.Modules.Utils.Vector? _, string mapName)
+        => ChatStyles.PickZoneFor(mapName, _rng);
+
+    /// Pick a teammate (alive) closest to a world position. Used to attribute
+    /// callouts ("smoke X") to the bot who'd most plausibly see it.
+    private CCSPlayerController? ClosestTeammateBot(CsTeam team, CounterStrikeSharp.API.Modules.Utils.Vector? pos, float maxRadius = 4000f)
+    {
+        if (pos == null) return null;
+        CCSPlayerController? best = null;
+        float bestD = maxRadius * maxRadius;
+        foreach (var b in Utilities.GetPlayers())
+        {
+            if (!b.IsValid || !b.IsBot || b.Team != team) continue;
+            var bp = b.PlayerPawn?.Value;
+            if (bp?.IsValid != true || bp.LifeState != (byte)LifeState_t.LIFE_ALIVE) continue;
+            var bpos = bp.AbsOrigin; if (bpos == null) continue;
+            var dx = bpos.X - pos.X; var dy = bpos.Y - pos.Y; var dz = bpos.Z - pos.Z;
+            var d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) { bestD = d; best = b; }
+        }
+        return best;
+    }
+
+    /// IGL-preferred talker — first alive IGL on team if any (with prob boost), else weighted talker.
+    private CCSPlayerController? PickIGLOrTalker(CsTeam team)
+    {
+        var bots = Utilities.GetPlayers().Where(p => p.IsValid && p.IsBot && p.Team == team).ToList();
+        if (bots.Count == 0) return null;
+        var igls = bots.Where(b =>
+            _botPersonas.TryGetValue(b.Slot, out var per) && per.Archetype == BotArchetype.IGL).ToList();
+        if (igls.Count > 0 && _rng.NextDouble() < 0.7) return igls[_rng.Next(igls.Count)];
+        return PickWeightedTalker(team);
+    }
+
+    private HookResult OnSmokeDetonate(EventSmokegrenadeDetonate e, GameEventInfo info)
+    {
+        if (!_calloutsEnabled || !_toxicChat) return HookResult.Continue;
+        var thrower = e.Userid;
+        if (thrower is null || !thrower.IsValid) return HookResult.Continue;
+        // Only call if smoke from ENEMY — teammate smokes shouldn't trigger surprise callout
+        var pos = new CounterStrikeSharp.API.Modules.Utils.Vector(e.X, e.Y, e.Z);
+        // Pick closest opposing-team bot to the smoke
+        var opp = thrower.Team == CsTeam.Terrorist ? CsTeam.CounterTerrorist : CsTeam.Terrorist;
+        var caller = ClosestTeammateBot(opp, pos) ?? PickWeightedTalker(opp);
+        if (caller == null) return HookResult.Continue;
+        if (!Roll(0.55f, caller)) return HookResult.Continue;
+        var zone = PickZoneForPosOrRandom(pos, Server.MapName ?? "");
+        var line = ChatStyles.PickCalloutFixed(ChatStyles.Callout_Smoke, zone, "", _rng);
+        var key = ChatStyles.ZoneKeyFor(Server.MapName ?? "", line);
+        ScheduleCalloutChat(caller, line, key, teamOnly: true, isToxic: false, responsePct: 0.20f);
+        return HookResult.Continue;
+    }
+
+    private HookResult OnInfernoStart(EventInfernoStartburn e, GameEventInfo info)
+    {
+        if (!_calloutsEnabled || !_toxicChat) return HookResult.Continue;
+        var pos = new CounterStrikeSharp.API.Modules.Utils.Vector(e.X, e.Y, e.Z);
+        // We don't know thrower team from this event reliably; pick whichever team has a bot near it
+        CCSPlayerController? caller = null;
+        foreach (var team in new[] { CsTeam.Terrorist, CsTeam.CounterTerrorist })
+        {
+            var c = ClosestTeammateBot(team, pos, 1200f);
+            if (c != null) { caller = c; break; }
+        }
+        if (caller == null) return HookResult.Continue;
+        if (!Roll(0.45f, caller)) return HookResult.Continue;
+        var zone = PickZoneForPosOrRandom(pos, Server.MapName ?? "");
+        var line = ChatStyles.PickCalloutFixed(ChatStyles.Callout_Molly, zone, "", _rng);
+        var key = ChatStyles.ZoneKeyFor(Server.MapName ?? "", line);
+        ScheduleCalloutChat(caller, line, key, teamOnly: true, isToxic: false, responsePct: 0.18f);
+        return HookResult.Continue;
+    }
+
+    private HookResult OnFlashDetonate(EventFlashbangDetonate e, GameEventInfo info)
+    {
+        // Used as a backstop — actual "flashed" callout fires from EventPlayerBlind
+        return HookResult.Continue;
+    }
+
+    private HookResult OnPlayerBlind(EventPlayerBlind e, GameEventInfo info)
+    {
+        if (!_calloutsEnabled || !_toxicChat) return HookResult.Continue;
+        var p = e.Userid;
+        if (p is null || !p.IsValid || !p.IsBot) return HookResult.Continue;
+        // BlindDuration field name may vary; use heuristic — only call if we know they got fully flashed
+        // (CS2 BlindDuration is on EventPlayerBlind as 'BlindDuration' float)
+        float dur;
+        try { dur = e.BlindDuration; } catch { dur = 1.2f; }
+        if (dur < 1.2f) return HookResult.Continue;
+        if (!Roll(0.55f, p)) return HookResult.Continue;
+        var line = ChatStyles.Callout_Flashed[_rng.Next(ChatStyles.Callout_Flashed.Length)];
+        // Don't dedup-by-zone for "flashed" (it's player-state, not zone)
+        ScheduleCalloutChat(p, line, zoneKey: null, teamOnly: true, isToxic: false, responsePct: 0.10f);
+        return HookResult.Continue;
+    }
+
+    private HookResult OnRoundTimeWarning(EventRoundTimeWarning e, GameEventInfo info)
+    {
+        if (!_calloutsEnabled || !_toxicChat) return HookResult.Continue;
+        if (_timeCalloutDoneThisRound) return HookResult.Continue;
+        _timeCalloutDoneThisRound = true;
+        // Pick whichever team is on offense — easier to approximate as T side; alternate fallback CT
+        foreach (var team in new[] { CsTeam.Terrorist, CsTeam.CounterTerrorist })
+        {
+            var caller = PickIGLOrTalker(team);
+            if (caller == null) continue;
+            if (!Roll(0.65f, caller)) continue;
+            var line = ChatStyles.Callout_TimeLow[_rng.Next(ChatStyles.Callout_TimeLow.Length)];
+            ScheduleCalloutChat(caller, line, zoneKey: null, teamOnly: true, isToxic: false, responsePct: 0.10f);
+            break;     // one team only
+        }
+        return HookResult.Continue;
+    }
+
+    private HookResult OnBombBeginDefuse(EventBombBegindefuse e, GameEventInfo info)
+    {
+        if (!_calloutsEnabled || !_toxicChat) return HookResult.Continue;
+        var defuser = e.Userid;
+        if (defuser is { IsValid: true, IsBot: true } && Roll(0.55f, defuser))
+        {
+            var line = ChatStyles.Callout_DefuseCommit[_rng.Next(ChatStyles.Callout_DefuseCommit.Length)];
+            ScheduleCalloutChat(defuser, line, zoneKey: null, teamOnly: true, isToxic: false, responsePct: 0.20f);
+        }
+        return HookResult.Continue;
     }
 }

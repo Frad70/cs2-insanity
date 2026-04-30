@@ -1230,6 +1230,106 @@ public static class ChatStyles
         // generic fallback
         return new[] { "a", "b", "mid", "ct spawn", "t spawn" }[rng.Next(5)];
     }
+
+    /// Canonicalize a callout line into a "zone family" key for dedup.
+    /// "low A site" / "they A" / "rotate A" → "a". "long A" → "a" (collapsed).
+    /// Returns null if no zone token recognized.
+    public static string? ZoneKeyFor(string mapName, string line)
+    {
+        if (string.IsNullOrEmpty(line)) return null;
+        if (!Map_Zones.TryGetValue(mapName, out var zones))
+            zones = new[] { "a", "b", "mid", "ct spawn", "t spawn" };
+        var lower = " " + line.ToLowerInvariant() + " ";
+        foreach (var z in zones.OrderByDescending(s => s.Length))
+        {
+            var pad = " " + z + " ";
+            if (lower.Contains(pad)) return CollapseFamily(z);
+        }
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\bsite\s*a\b|\blong\s*a\b|\bshort\s*a\b|\bapps?\b|\bramp\b|\bbanana\b|\bpalace\b|\bgoose\b|\bpit\b|\blibrary\b")) return "a";
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\bsite\s*b\b|\blong\s*b\b|\btunnels?\b|\bunderpass\b|\bb doors\b|\bmonster\b|\bbathrooms\b")) return "b";
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\bmid\b|\bconnector\b|\bvents?\b|\bz connector\b|\bjungle\b|\bdonut\b|\bcave\b|\bstairs\b|\belevator\b")) return "mid";
+        return null;
+    }
+
+    private static string CollapseFamily(string zone)
+    {
+        var z = zone.ToLowerInvariant();
+        if (z.EndsWith(" a") || z == "a" || z == "long a" || z == "short a" || z == "apps" || z == "ramp" || z == "banana" || z == "palace" || z == "goose" || z == "pit" || z == "long" || z == "short" || z == "library") return "a";
+        if (z.EndsWith(" b") || z == "b" || z == "tunnels" || z == "underpass" || z == "b doors" || z == "monster" || z == "bathrooms") return "b";
+        if (z == "mid" || z == "connector" || z == "vents" || z == "z connector" || z == "jungle" || z == "donut" || z == "cave" || z == "stairs" || z == "elevator") return "mid";
+        return z;
+    }
+
+    // ----- Callout pools (v0.9.0) -----
+    public static readonly string[] Callout_Smoke =
+    {
+        "smoke {z}", "smoked {z}", "they smoked {z}", "smoke off {z}", "{z} smoked", "wall {z}",
+    };
+    public static readonly string[] Callout_Molly =
+    {
+        "molly {z}", "incen {z}", "fire {z}", "{z} on fire", "burning {z}", "molly on {z}",
+    };
+    public static readonly string[] Callout_Flashed =
+    {
+        "flashed", "im flashed", "blind", "cant see", "FLASHED", "fully flashed", "flash flash",
+    };
+    public static readonly string[] Callout_Planted =
+    {
+        "PLANTED {z}", "they planted {z}", "bomb {z}", "plant {z}", "down {z} defuse",
+    };
+    public static readonly string[] Callout_DefuseCommit =
+    {
+        "going for defuse", "defusing", "kit on me", "on it", "defuse i need cover", "im defusing cover me",
+    };
+    public static readonly string[] Callout_TimeLow =
+    {
+        "TIME", "time", "10 sec", "no time", "we lost time", "timeeee",
+    };
+    public static readonly string[] Callout_OneShot =
+    {
+        "one shot {who}", "low {who}", "{who} low", "{who} 1hp", "low low low", "ONE SHOT", "shot {who}",
+    };
+    public static readonly string[] Callout_OneShotZone =
+    {
+        "one shot {z}", "low {z}", "{z} low", "shot {z}",
+    };
+    public static readonly string[] Callout_ShotsFired =
+    {
+        "shots {z}", "firing {z}", "they {z}", "contact {z}", "engaging {z}", "shooting {z}",
+    };
+    public static readonly string[] Callout_Footsteps =
+    {
+        "steps {z}", "i hear {z}", "someone {z}", "ppl {z}", "rotating {z}",
+    };
+    public static readonly string[] Callout_Echo =
+    {
+        "yeah i see him", "got him", "ye copy", "i see", "same", "+", "yep", "saw",
+    };
+    public static readonly string[] Callout_Question =
+    {
+        "where exactly", "where", "?", "where {z}", "exact?", "alive?", "still there?",
+    };
+    public static readonly string[] Callout_Rebuke =
+    {
+        "shut up bot", "we know", "stfu", "stop spamming", "we know bot", "yes obviously", "ok and?",
+    };
+    public static readonly string[] Callout_Trade =
+    {
+        "rotating", "coming", "om w", "on the way", "trading", "with you", "moving {z}",
+    };
+
+    public static string PickCallout(string[] pool, string mapName, string who, Random rng)
+    {
+        var z = PickZoneFor(mapName, rng);
+        var line = pool[rng.Next(pool.Length)];
+        return line.Replace("{z}", z).Replace("{who}", string.IsNullOrEmpty(who) ? "him" : who);
+    }
+    public static string PickCalloutFixed(string[] pool, string zone, string who, Random rng)
+    {
+        var line = pool[rng.Next(pool.Length)];
+        return line.Replace("{z}", zone ?? "").Replace("{who}", string.IsNullOrEmpty(who) ? "him" : who);
+    }
+
     public static string PickGLHF(Random rng) => GLHF_Match[rng.Next(GLHF_Match.Length)];
     public static string PickDeafMock(string who, Random rng) => DeafMock[rng.Next(DeafMock.Length)].Replace("{who}", who);
     public static string PickStratRush(Random rng) => Strat_Rush[rng.Next(Strat_Rush.Length)];
