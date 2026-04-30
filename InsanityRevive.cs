@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.18.0";
+    public override string ModuleVersion => "0.19.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -669,6 +669,7 @@ public partial class InsanityRevive : BasePlugin
             if (Roll(chance, victim))
             {
                 var zone = ChatStyles.PickZoneFor(Server.MapName ?? "", _rng);
+                LogBehavior("DEATH_PING", $"{victim.PlayerName} mood={vPer.Mood} zone={zone}");
                 AddTimer(0.7f + (float)_rng.NextDouble() * 1.3f, () =>
                 {
                     if (!victim.IsValid) return;
@@ -710,10 +711,14 @@ public partial class InsanityRevive : BasePlugin
                             teamOnly: false, isToxic: true);
                     });
                 }
-                // Vote-kick chance (high cooldown still applies)
-                if (Server.CurrentTime - _lastVoteCallTime > 60f && Roll(0.40f))
+                // v0.19: vote-kick chance — auto-bumped to 0.85 if killer is
+                // chronic team-killer (2+ FF kills this match). Real MM: one TK
+                // is forgiven; two becomes a vote-kick almost-certainly.
+                float voteChance = _decisions.IsChronicTeamKiller(killer.Slot) ? 0.85f : 0.40f;
+                if (Server.CurrentTime - _lastVoteCallTime > 60f && Roll(voteChance))
                 {
                     var initiator = survivors[_rng.Next(survivors.Count)];
+                    LogBehavior("VOTEKICK_TK", $"target={killer.PlayerName} chronic={(_decisions.IsChronicTeamKiller(killer.Slot)?1:0)}");
                     AddTimer(3.5f + (float)_rng.NextDouble() * 2f, () =>
                         CallVoteKick(initiator: initiator, target: killer, reason: "tk"));
                 }
@@ -1601,6 +1606,7 @@ public partial class InsanityRevive : BasePlugin
             string? stratKind = DetectStratCall(raw);
             if (stratKind != null)
             {
+                LogBehavior("STRAT_HEARD", $"{sayer.PlayerName} called {stratKind}");
                 var teammateBots = Utilities.GetPlayers()
                     .Where(p => p.IsValid && p.IsBot && p.Team == sayer.Team).ToList();
                 int n = Math.Min(2, teammateBots.Count);
@@ -1952,6 +1958,7 @@ public partial class InsanityRevive : BasePlugin
                     _                     => 0.25f,
                 };
                 if (!Roll(baseChance)) continue;
+                LogBehavior("PRE_CLUTCH", $"{p.PlayerName} 1v{opp} mood={per.Mood}");
                 // Pick teammate ref for "trade me {ref}" lines (the bot who just died)
                 var refName = p.PlayerName;
                 AddTimer(0.6f + (float)_rng.NextDouble() * 1.4f, () =>

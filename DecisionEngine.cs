@@ -29,6 +29,7 @@ public class DecisionEngine
         public int TimesChoked;         // last man, lost
         public int FFTakenThisMatch;    // damage from teammates
         public int FFGivenThisMatch;    // damage to teammates
+        public int FFKillsThisMatch;    // v0.19: separate counter for team-kill events
         public float Tilt;              // -1..+1; positive = pumped, negative = tilted
         public float Confidence;        // 0..1 (aim shake reduces if low)
         public bool ProbablyEcoing;     // current round bot is saving
@@ -59,18 +60,26 @@ public class DecisionEngine
     public void OnBotKill(int slot, bool wasHeadshot, bool wasTeammate)
     {
         var s = GetOrCreate(slot);
+        // v0.19: FF kills still increment KillsThisMatch (matches scoreboard
+        // semantics) but DON'T boost confidence and DO heavily tilt the killer.
+        // Separate FFKillsThisMatch counter is read by IsChronicTeamKiller.
+        s.KillsThisMatch++;
+        if (wasHeadshot) s.HeadshotsThisMatch++;
         if (wasTeammate)
         {
-            // FF kills don't boost confidence — they spike tilt.
+            s.FFKillsThisMatch++;
             s.FFGivenThisMatch += 100;
             s.Tilt = MathF.Max(-1f, s.Tilt - 0.30f);
             return;
         }
-        s.KillsThisMatch++;
-        if (wasHeadshot) s.HeadshotsThisMatch++;
         s.Confidence = MathF.Min(1f, s.Confidence + 0.04f + (wasHeadshot ? 0.04f : 0f));
         s.Tilt = MathF.Min(1f, s.Tilt + (wasHeadshot ? 0.10f : 0.05f));
     }
+
+    /// <summary>v0.19: bot has 2+ FF kills this match — chronic team-killer.
+    /// Used to gate vote-kick auto-fire from teammates.</summary>
+    public bool IsChronicTeamKiller(int slot) =>
+        _states.TryGetValue(slot, out var s) && s.FFKillsThisMatch >= 2;
 
     /// <summary>Bot died.</summary>
     public void OnBotDeath(int slot, bool diedToTeammate, bool dyingAsLastMan)
