@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.21.0";
+    public override string ModuleVersion => "0.22.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -926,7 +926,7 @@ public partial class InsanityRevive : BasePlugin
 
         if (sum <= 30 && attacker.IsBot && Roll(0.55f, attacker))
         {
-            ScheduleBotChat(attacker, victim.PlayerName, (_, __) => ChatStyles.PickFFSorryLine(_rng), teamOnly: true, isToxic: false);
+            ScheduleBotChat(attacker, victim.PlayerName ?? "", (_, __) => ChatStyles.PickFFSorryLine(_rng), teamOnly: true, isToxic: false);
             _recentSorry[key] = now; // bot's own sorry counts too
             return HookResult.Continue;
         }
@@ -1647,6 +1647,33 @@ public partial class InsanityRevive : BasePlugin
                     ScheduleBotChat(responder, sayer.PlayerName,
                         (_, __) => ChatStyles.PickHumanChatReact(_rng),
                         teamOnly: false, isToxic: true);
+            }
+        }
+
+        // v0.22: rich bot reacts when a teammate asks for a drop ("drop me",
+        // "drop ak", "im broke", "buy me"). 1 reply per team per request,
+        // mood-skewed. Cooldown via _dropReplyCooldown.
+        if (sayer.Team > CsTeam.Spectator
+            && (raw.Contains("drop me") || raw.Contains("drop pls") || raw.Contains("drop ak")
+                || raw.Contains("drop awp") || raw.Contains("im broke") || raw.Contains("buy me")
+                || raw.Contains("дроп")))
+        {
+            var rich = Utilities.GetPlayers()
+                .Where(p => p.IsValid && p.IsBot && p != sayer && p.Team == sayer.Team
+                            && (p.InGameMoneyServices?.Account ?? 0) >= 5000)
+                .OrderByDescending(p => p.InGameMoneyServices?.Account ?? 0)
+                .FirstOrDefault();
+            if (rich != null
+                && _botPersonas.TryGetValue(rich.Slot, out var rPer)
+                && Roll(0.55f))
+            {
+                LogBehavior("DROP_REPLY", $"{rich.PlayerName} → {sayer.PlayerName} mood={rPer.Mood}");
+                AddTimer(0.4f + (float)_rng.NextDouble() * 1.0f, () =>
+                {
+                    if (!rich.IsValid) return;
+                    ScheduleBotChat(rich, "", (_, __) => ChatStyles.PickDropReply(rPer, _rng),
+                        teamOnly: true, isToxic: rPer.Mood == Friendliness.Hostile);
+                });
             }
         }
 

@@ -1051,6 +1051,32 @@ public static class ChatStyles
         "drop me {who}", "drop pls", "im 1k drop?", "drop me ill carry",
         "have nothing", "broke", "drop pls if u can",
     };
+    /// v0.22: rich bot's reply when a teammate asks for a drop.
+    private static readonly string[] DropReply_Friendly =
+    {
+        "k", "ok", "after rd", "1s", "incoming", "wait", "1 sec",
+        "after this round", "y", "ok ill drop", "after spawn",
+    };
+    private static readonly string[] DropReply_Hostile =
+    {
+        "buy ur own", "no", "earn it", "lol no", "broke not my problem",
+        "save up", "ill drop after u prove it", "no",
+    };
+    private static readonly string[] DropReply_Neutral =
+    {
+        "after rd", "hmm", "1s", "ok", "after spawn", "if i alive", "k",
+    };
+    public static string PickDropReply(BotPersona p, Random rng)
+    {
+        var pool = p.Mood switch
+        {
+            Friendliness.Friendly => DropReply_Friendly,
+            Friendliness.Hostile  => DropReply_Hostile,
+            _                     => DropReply_Neutral,
+        };
+        return pool[rng.Next(pool.Length)];
+    }
+
     public static string PickDropRequest(BotPersona p, string who, Random rng)
     {
         var pool = p.Mood switch
