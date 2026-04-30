@@ -7,3 +7,8 @@ Until that phrase appears in a user message:
 
 When it appears:
 - Stop autonomous work, hand back control, summarize.
+
+Loop cadence: 240-270s (NOT 1500s). User explicit:
+"Бери перерывы по мин. 3-5 максимум, ибо после 25-и приходится
+снова отправлять кэши => хуже качество твоих ответов."
+Reason: Anthropic prompt cache TTL = 5 min. Stay inside it.

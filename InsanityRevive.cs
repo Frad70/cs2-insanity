@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.11.0";
+    public override string ModuleVersion => "0.12.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -110,6 +110,11 @@ public partial class InsanityRevive : BasePlugin
     private float _streakHypePct    = 0.18f;
     private float _argueChancePct   = 0.10f;
     private float _chatCooldownSec  = 7.0f;
+
+    /// v0.12: per-bot buy override — issue persona-driven `buy weapon_X`
+    /// commands at start of buy time. Default OFF since it races engine-AI;
+    /// user can enable with `css_buy_override 1`.
+    private bool _buyOverrideEnabled = false;
 
     // 0.4 dials
     private float _afkOnSpawnPct        = 0.04f;   // chance a bot starts the round AFK
@@ -252,6 +257,16 @@ public partial class InsanityRevive : BasePlugin
     [CommandHelper(minArgs: 1, usage: "<casual|normal|hard|insane|aimbot>", whoCanExecute: CommandUsage.SERVER_ONLY)]
     public void OnBotsPresetCommand(CCSPlayerController? _, CommandInfo info) => ApplyPreset(info.GetArg(1), announce: true);
 
+    [ConsoleCommand("css_buy_override", "Toggle per-bot persona-driven buy commands (0/1)")]
+    [CommandHelper(minArgs: 1, usage: "<0|1>", whoCanExecute: CommandUsage.SERVER_ONLY)]
+    public void OnBuyOverrideCommand(CCSPlayerController? _, CommandInfo info)
+    {
+        var arg = info.GetArg(1);
+        if (arg == "1" || arg.Equals("on", StringComparison.OrdinalIgnoreCase)) _buyOverrideEnabled = true;
+        else if (arg == "0" || arg.Equals("off", StringComparison.OrdinalIgnoreCase)) _buyOverrideEnabled = false;
+        Server.PrintToChatAll($"[INSANITY] buy_override = {(_buyOverrideEnabled ? "ON" : "OFF")}");
+    }
+
     private void OpenRootMenu(CCSPlayerController player)
     {
         var menu = new ChatMenu("INSANITY");
@@ -312,6 +327,74 @@ public partial class InsanityRevive : BasePlugin
             if (!bot.IsValid) return;
             try { bot.ExecuteClientCommandFromServer(cmd); } catch { }
         });
+    }
+
+    /// v0.12: at start of buy time, fire `buy weapon_X` commands per-bot
+    /// based on their persona's BuyPreferences. Each bot gets its own buy
+    /// plan: full / force / eco governed by EconomyModel.PlannedBuy and
+    /// the bot's individual BuyForceTendency. Spread firing across 0-2.5s
+    /// so it doesn't all happen on the same tick (looks more human).
+    private void IssuePersonaBuyCommands()
+    {
+        var econT  = _econ.GetTeam(CsTeam.Terrorist);
+        var econCT = _econ.GetTeam(CsTeam.CounterTerrorist);
+
+        foreach (var bot in Utilities.GetPlayers())
+        {
+            if (!bot.IsValid || !bot.IsBot) continue;
+            if (bot.Team <= CsTeam.Spectator) continue;
+            if (!_botPersonas.TryGetValue(bot.Slot, out var per)) continue;
+            var prefs = _buyPrefs.GetOrRoll(bot.Slot, per, _rng);
+            var plan = (bot.Team == CsTeam.Terrorist ? econT : econCT).PlannedBuy;
+
+            // Force-buy override: per-bot tendency can upgrade SemiEco → ForceBuy.
+            if (plan == EconomyModel.BuyPlan.SemiEco
+                && _rng.NextDouble() < prefs.BuyForceTendency)
+                plan = EconomyModel.BuyPlan.ForceBuy;
+
+            // Build the buy list
+            var cmds = new List<string>();
+            if (plan == EconomyModel.BuyPlan.FullBuy || plan == EconomyModel.BuyPlan.ForceBuy)
+            {
+                cmds.Add("buy " + _buyPrefs.ResolvePrimaryWeapon(prefs, bot.Team));
+                if (prefs.BuysArmor)   cmds.Add(prefs.BuysHelmet ? "buy vesthelm" : "buy vest");
+                if (bot.Team == CsTeam.CounterTerrorist && prefs.BuysDefuser) cmds.Add("buy defuser");
+                if (prefs.BuysFlashes) cmds.Add("buy flashbang");
+                if (prefs.BuysSmokes)  cmds.Add("buy smokegrenade");
+                if (prefs.BuysMolotovs) cmds.Add(bot.Team == CsTeam.CounterTerrorist ? "buy incgrenade" : "buy molotov");
+                if (prefs.BuysHE)      cmds.Add("buy hegrenade");
+            }
+            else if (plan == EconomyModel.BuyPlan.SemiEco)
+            {
+                cmds.Add("buy " + _buyPrefs.ResolveSecondaryWeapon(prefs, bot.Team));
+                if (prefs.BuysArmor && _rng.NextDouble() < 0.6) cmds.Add("buy vest");
+            }
+            else // Eco
+            {
+                if (_rng.NextDouble() < 0.30) cmds.Add("buy " + _buyPrefs.ResolveSecondaryWeapon(prefs, bot.Team));
+            }
+
+            // Chaotic: 4% of bots — replace plan with a random weird buy
+            if (prefs.ChaoticBuys && _rng.NextDouble() < 0.30)
+            {
+                cmds.Clear();
+                var weird = new[] { "weapon_p90", "weapon_xm1014", "weapon_negev", "weapon_m249",
+                                    "weapon_mag7", "weapon_ump45", "weapon_deagle" };
+                cmds.Add("buy " + weird[_rng.Next(weird.Length)]);
+                if (_rng.NextDouble() < 0.7) cmds.Add("buy vesthelm");
+            }
+
+            // Fire them spread across 0..2.5s
+            for (int i = 0; i < cmds.Count; i++)
+            {
+                var cmd = cmds[i];
+                AddTimer(0.10f + i * 0.15f + (float)_rng.NextDouble() * 0.25f, () =>
+                {
+                    if (!bot.IsValid) return;
+                    try { bot.ExecuteClientCommandFromServer(cmd); } catch { }
+                });
+            }
+        }
     }
 
     private static readonly Dictionary<string, (string profile, int diff, string aim)> _presets = new()
@@ -956,6 +1039,11 @@ public partial class InsanityRevive : BasePlugin
         }
         _econ.SnapshotForRound(CsTeam.Terrorist);
         _econ.SnapshotForRound(CsTeam.CounterTerrorist);
+
+        // v0.12: persona-driven buy commands at start of buy time.
+        // Default OFF (engine bots have their own logic — toggle via css_buy_override).
+        if (_buyOverrideEnabled)
+            AddTimer(1.8f + (float)_rng.NextDouble() * 1.4f, IssuePersonaBuyCommands);
 
         // 0.7 — first round of match: friendly bots post GL/glhf
         if (_matchRoundCount <= 1 && _toxicChat)
