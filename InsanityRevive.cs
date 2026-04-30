@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.19.0";
+    public override string ModuleVersion => "0.20.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -343,6 +343,46 @@ public partial class InsanityRevive : BasePlugin
     /// plan: full / force / eco governed by EconomyModel.PlannedBuy and
     /// the bot's individual BuyForceTendency. Spread firing across 0-2.5s
     /// so it doesn't all happen on the same tick (looks more human).
+    /// v0.20: at start of round, broke bots ask the richest teammate to drop them.
+    /// Cap: 1 drop request per round (avoid spam). Mood-skewed wording.
+    private void IssueDropRequests()
+    {
+        // Find broke bots and the richest teammate per team
+        foreach (var team in new[] { CsTeam.Terrorist, CsTeam.CounterTerrorist })
+        {
+            var roster = Utilities.GetPlayers().Where(p => p.IsValid && p.Team == team).ToList();
+            if (roster.Count < 2) continue;
+            var rich = roster
+                .Where(p => (p.InGameMoneyServices?.Account ?? 0) >= 5000)
+                .OrderByDescending(p => p.InGameMoneyServices?.Account ?? 0)
+                .FirstOrDefault();
+            if (rich == null) continue;
+            var brokeBots = roster
+                .Where(p => p.IsBot && p != rich && (p.InGameMoneyServices?.Account ?? 0) < 1500)
+                .ToList();
+            if (brokeBots.Count == 0) continue;
+
+            // Pick one broke bot at random, mood-roll, fire
+            var bot = brokeBots[_rng.Next(brokeBots.Count)];
+            if (!_botPersonas.TryGetValue(bot.Slot, out var per)) continue;
+            float chance = per.Mood switch
+            {
+                Friendliness.Friendly => 0.65f,
+                Friendliness.Hostile  => 0.40f,
+                _                     => 0.45f,
+            };
+            if (!Roll(chance)) continue;
+            var refName = ChatStyles.RefName(rich.PlayerName, (int)rich.Team, _rng);
+            LogBehavior("DROP_REQ", $"{bot.PlayerName} → {rich.PlayerName} mood={per.Mood}");
+            AddTimer(0.4f + (float)_rng.NextDouble() * 1.2f, () =>
+            {
+                if (!bot.IsValid) return;
+                ScheduleBotChat(bot, "", (_, __) => ChatStyles.PickDropRequest(per, refName, _rng),
+                    teamOnly: true, isToxic: per.Mood == Friendliness.Hostile);
+            });
+        }
+    }
+
     private void IssuePersonaBuyCommands()
     {
         var econT  = _econ.GetTeam(CsTeam.Terrorist);
@@ -1135,6 +1175,9 @@ public partial class InsanityRevive : BasePlugin
         // Default OFF (engine bots have their own logic — toggle via css_buy_override).
         if (_buyOverrideEnabled)
             AddTimer(1.8f + (float)_rng.NextDouble() * 1.4f, IssuePersonaBuyCommands);
+
+        // v0.20: drop-request chat — broke bots ask rich teammates to drop them.
+        AddTimer(2.5f + (float)_rng.NextDouble() * 2.0f, IssueDropRequests);
 
         // 0.7 — first round of match: friendly bots post GL/glhf
         if (_matchRoundCount <= 1 && _toxicChat)

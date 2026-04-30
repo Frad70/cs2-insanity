@@ -1034,6 +1034,34 @@ public static class ChatStyles
         "k slow", "ok default", "playing slow", "rg", "info first",
     };
 
+    /// v0.20: drop-request line. {who} = ref-name of rich teammate.
+    private static readonly string[] DropReq_Friendly =
+    {
+        "drop me pls {who}", "broke pls", "drop me {who}?", "buy me?",
+        "im broke {who}", "drop pls", "drop me ak", "drop awp pls",
+        "im 800 drop?", "anyone drop", "guys drop me",
+    };
+    private static readonly string[] DropReq_Hostile =
+    {
+        "drop me {who} or u bot", "drop or kicked", "drop me i carry",
+        "useless if u dont drop", "drop", "drop now {who}",
+    };
+    private static readonly string[] DropReq_Neutral =
+    {
+        "drop me {who}", "drop pls", "im 1k drop?", "drop me ill carry",
+        "have nothing", "broke", "drop pls if u can",
+    };
+    public static string PickDropRequest(BotPersona p, string who, Random rng)
+    {
+        var pool = p.Mood switch
+        {
+            Friendliness.Hostile  => DropReq_Hostile,
+            Friendliness.Friendly => DropReq_Friendly,
+            _                     => DropReq_Neutral,
+        };
+        return pool[rng.Next(pool.Length)].Replace("{who}", string.IsNullOrEmpty(who) ? "u" : who);
+    }
+
     public static string PickStratAck(BotPersona p, string kind, Random rng)
     {
         if (p.Mood == Friendliness.Hostile && rng.NextDouble() < 0.55)
