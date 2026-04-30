@@ -988,6 +988,26 @@ public static class ChatStyles
     public static string PickCoordNoYouFirst(string who, Random rng) => Coord_NoYouFirst[rng.Next(Coord_NoYouFirst.Length)].Replace("{who}", who);
 
     public static string PickGGLine(Random rng)         => GG_Friendly[rng.Next(GG_Friendly.Length)];
+
+    /// v0.15: spectator-ping fired by a bot the moment they die. Names the
+    /// zone they died in so teammates know what to expect. {z} substituted
+    /// with zone label. Mood-skewed.
+    private static readonly string[] DeathPing_Neutral =
+    {
+        "{z}", "they {z}", "i died {z}", "lost {z}", "got tagged {z}",
+        "watch {z}", "info {z}", "from {z}", "pushed me {z}",
+    };
+    private static readonly string[] DeathPing_Toxic =
+    {
+        "great trade huh", "where was the trade {z}", "0 trade {z}",
+        "obviously they were {z}", "literally said {z}", "useless team {z}",
+        "carrying corpses", "watched me die {z}",
+    };
+    public static string PickDeathPing(BotPersona p, string zone, Random rng)
+    {
+        var pool = p.Mood == Friendliness.Hostile ? DeathPing_Toxic : DeathPing_Neutral;
+        return pool[rng.Next(pool.Length)].Replace("{z}", string.IsNullOrEmpty(zone) ? "site" : zone);
+    }
     public static string PickFriendlyLine(Random rng)   => Friendly_Nice[rng.Next(Friendly_Nice.Length)];
     public static string PickAFKHeadsUp(Random rng)     => AFK_HeadsUp[rng.Next(AFK_HeadsUp.Length)];
     public static string PickAFKFlame(string who, Random rng) => AFK_Flame[rng.Next(AFK_Flame.Length)].Replace("{who}", who);

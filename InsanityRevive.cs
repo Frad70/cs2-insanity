@@ -15,7 +15,7 @@ namespace InsanityRevive;
 public partial class InsanityRevive : BasePlugin
 {
     public override string ModuleName => "INSANITY REVIVE";
-    public override string ModuleVersion => "0.14.0";
+    public override string ModuleVersion => "0.15.0";
     public override string ModuleAuthor => "frad70 + Claude";
     public override string ModuleDescription => "Predictive aim + per-bot personas, social bots, zone-aware callouts (smoke/molly/flash/plant/time/low-HP), echo/rebuke chains, IGL strats, body-block FF consequences.";
 
@@ -597,6 +597,31 @@ public partial class InsanityRevive : BasePlugin
         if (victim is { IsValid: true, IsBot: true } && _toxicChat && Roll(_deathChatPct, victim))
             ScheduleBotChat(victim, killer?.PlayerName ?? "smbdy",
                 ChatStyles.PickDeathLine, teamOnly: false, isToxic: false);
+
+        // v0.15: spectator-ping — bot dying to enemy fires zone-aware info call.
+        // Skipped for FF deaths (handled by FF rage path), and skipped if victim
+        // already typed too much. Mood-skewed via PickDeathPing.
+        if (!ffKill && victim is { IsValid: true, IsBot: true } && killer != null
+            && _toxicChat
+            && _botPersonas.TryGetValue(victim.Slot, out var vPer))
+        {
+            float chance = vPer.Mood switch
+            {
+                Friendliness.Hostile  => 0.35f,
+                Friendliness.Friendly => 0.25f,
+                _                     => 0.18f,
+            };
+            if (Roll(chance, victim))
+            {
+                var zone = ChatStyles.PickZoneFor(Server.MapName ?? "", _rng);
+                AddTimer(0.7f + (float)_rng.NextDouble() * 1.3f, () =>
+                {
+                    if (!victim.IsValid) return;
+                    ScheduleBotChat(victim, "", (_, __) => ChatStyles.PickDeathPing(vPer, zone, _rng),
+                        teamOnly: true, isToxic: vPer.Mood == Friendliness.Hostile);
+                });
+            }
+        }
 
         // ── TEAM RAGE on FF-kill ──
         // If a player (especially a human) just killed a teammate, surviving teammate
