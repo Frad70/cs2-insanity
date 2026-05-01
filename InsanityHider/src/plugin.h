@@ -31,11 +31,10 @@ public:
     const char* GetLogTag()      override { return "INSANITYHIDER"; }
 
     InsanityHider::Pool* GetPool() { return &m_Pool; }
-    bool IsActive() const { return m_bActive; }
 
 private:
     InsanityHider::Pool m_Pool;
-    bool m_bActive = true;  // toggled at runtime via insanity_hider_active (step d)
+    bool m_bSelfDisabled = false;  // latched on pool header corruption
 };
 
 extern InsanityHiderPlugin g_Plugin;

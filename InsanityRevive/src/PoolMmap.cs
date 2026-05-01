@@ -20,6 +20,7 @@ public sealed class PoolMmap : IDisposable
     public const uint Version      = 1u;
     public const int  Slots        = 120;
     public const int  HeaderBytes  = 12;
+    public const int  ActiveOffset = 8;   // uint32 kill-switch flag (0/1)
     public const int  Total        = HeaderBytes + Slots;
 
     private MemoryMappedFile? _mmf;
@@ -54,10 +55,16 @@ public sealed class PoolMmap : IDisposable
                 Log.Warn($"PoolMmap reinit (magic=0x{magic:X8} ver={version})");
                 _va.Write(0, Magic);
                 _va.Write(4, Version);
-                _va.Write(8, 0u);
+                _va.Write(8, 1u);  // active by default
                 for (int i = 0; i < Slots; i++) _va.Write(HeaderBytes + i, (byte)0);
             }
-            Log.Info($"PoolMmap opened: {path} ({Slots} slots)");
+            else
+            {
+                // Existing valid pool — make sure active flag is set on each
+                // boot. We never persist "disabled" across server restarts.
+                _va.Write(ActiveOffset, 1u);
+            }
+            Log.Info($"PoolMmap opened: {path} ({Slots} slots, active=1)");
             return true;
         }
         catch (Exception ex)
@@ -80,6 +87,18 @@ public sealed class PoolMmap : IDisposable
         if (_va == null) return 0;
         if (slot < 0 || slot >= Slots) return 0;
         return _va.ReadByte(HeaderBytes + slot);
+    }
+
+    public void WriteActive(bool active)
+    {
+        if (_va == null) return;
+        _va.Write(ActiveOffset, active ? 1u : 0u);
+    }
+
+    public bool ReadActive()
+    {
+        if (_va == null) return false;
+        return _va.ReadUInt32(ActiveOffset) != 0;
     }
 
     public void Close()
