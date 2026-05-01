@@ -60,9 +60,12 @@ public sealed class PoolMmap : IDisposable
             }
             else
             {
-                // Existing valid pool — make sure active flag is set on each
-                // boot. We never persist "disabled" across server restarts.
+                // Existing valid pool — restart from a clean slate. Stale
+                // marks from a prior session would otherwise let C++ Hider
+                // flip byte 160 for any client who lands in those slots.
+                // Active flag is also reset on every boot.
                 _va.Write(ActiveOffset, 1u);
+                for (int i = 0; i < Slots; i++) _va.Write(HeaderBytes + i, (byte)0);
             }
             Log.Info($"PoolMmap opened: {path} ({Slots} slots, active=1)");
             return true;
