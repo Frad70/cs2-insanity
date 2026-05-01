@@ -67,30 +67,31 @@ static CServerSideClient* ResolveClientBySlot(int slot) {
 void InsanityHiderPlugin::Hook_OnClientConnected_Post(CPlayerSlot slot, const char* pszName, uint64,
                                                      const char*, const char*, bool bFakePlayer) {
     int idx = slot.Get();
-    bool inRange = (idx >= 0 && idx < (int)InsanityHider::POOL_SLOTS);
-    bool managed = inRange ? m_Pool.IsManaged(idx) : false;
 
-    auto* pClient = inRange ? ResolveClientBySlot(idx) : nullptr;
-    int fpByte = -1;
-    if (pClient) fpByte = reinterpret_cast<unsigned char*>(pClient)[kFakePlayerOffset];
+    // Self-disable guard (c): if the pool's magic/version has shifted under
+    // us (CSSharp recreated it with a different layout), latch off forever.
+    // m_bSelfDisabled is a runtime latch, separate from the kill-switch.
+    if (m_bSelfDisabled) RETURN_META(MRES_IGNORED);
+    if (m_Pool.IsOpen() && !m_Pool.RevalidateHeader()) {
+        META_CONPRINTF("[InsanityHider] error: pool header revalidation failed — self-disabling\n");
+        m_bSelfDisabled = true;
+        RETURN_META(MRES_IGNORED);
+    }
 
-    // Pool snapshot for first 8 slots — diagnose pre-mark/slot-pick mismatch.
-    unsigned p[8] = {0};
-    for (int i = 0; i < 8; ++i) p[i] = m_Pool.IsManaged(i) ? 1 : 0;
+    if (!m_Pool.IsActive())                                   RETURN_META(MRES_IGNORED);
+    if (!bFakePlayer)                                         RETURN_META(MRES_IGNORED);
+    if (idx < 0 || idx >= (int)InsanityHider::POOL_SLOTS)     RETURN_META(MRES_IGNORED);
+    if (!m_Pool.IsManaged(idx))                               RETURN_META(MRES_IGNORED);
 
-    META_CONPRINTF("[InsanityHider] OCC fire slot=%d name=%s fake=%d managed=%d byte160=0x%02x "
-                   "pool[0..7]=%u%u%u%u%u%u%u%u active=%d\n",
-                   idx, pszName ? pszName : "?", (int)bFakePlayer, (int)managed,
-                   fpByte & 0xff, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7], (int)m_bActive);
+    auto* pClient = ResolveClientBySlot(idx);
+    if (!pClient) {
+        META_CONPRINTF("[InsanityHider] error: ResolveClientBySlot null slot=%d\n", idx);
+        RETURN_META(MRES_IGNORED);
+    }
 
-    if (!m_bActive)         { META_CONPRINTF("[InsanityHider] OCC skip reason=inactive slot=%d\n", idx); RETURN_META(MRES_IGNORED); }
-    if (!inRange)           { META_CONPRINTF("[InsanityHider] OCC skip reason=out_of_range slot=%d\n", idx); RETURN_META(MRES_IGNORED); }
-    if (!bFakePlayer)       { META_CONPRINTF("[InsanityHider] OCC skip reason=not_fake slot=%d\n", idx); RETURN_META(MRES_IGNORED); }
-    if (!managed)           { META_CONPRINTF("[InsanityHider] OCC skip reason=unmanaged slot=%d\n", idx); RETURN_META(MRES_IGNORED); }
-    if (!pClient)           { META_CONPRINTF("[InsanityHider] OCC skip reason=resolve_null slot=%d\n", idx); RETURN_META(MRES_IGNORED); }
-    if (fpByte != 0x01)     { META_CONPRINTF("[InsanityHider] OCC skip reason=byte_not_01 slot=%d byte=0x%02x\n", idx, fpByte & 0xff); RETURN_META(MRES_IGNORED); }
-
-    reinterpret_cast<unsigned char*>(pClient)[kFakePlayerOffset] = 0;
+    auto* raw = reinterpret_cast<unsigned char*>(pClient);
+    if (raw[kFakePlayerOffset] != 0x01) RETURN_META(MRES_IGNORED);  // idempotent
+    raw[kFakePlayerOffset] = 0;
     META_CONPRINTF("[InsanityHider] wrote 0x00 slot=%d name=%s\n", idx, pszName ? pszName : "?");
     RETURN_META(MRES_IGNORED);
 }
@@ -127,8 +128,8 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     SH_ADD_HOOK(IServerGameClients, OnClientConnected, gameclients,
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
 
-    META_CONPRINTF("[InsanityHider] loaded — m_bFakePlayer offset=%d active=%d\n",
-                   kFakePlayerOffset, (int)m_bActive);
+    META_CONPRINTF("[InsanityHider] loaded — m_bFakePlayer offset=%d, kill-switch via pool[%zu]\n",
+                   kFakePlayerOffset, InsanityHider::POOL_ACTIVE_OFFSET);
     return true;
 }
 

@@ -16,6 +16,11 @@ public:
     void Close();
     bool IsOpen() const { return m_pBase != nullptr; }
     bool IsManaged(int slot) const;
+    bool IsActive() const;
+    // Re-validates magic+version against the live mapping. Returns false if
+    // the pool was recreated under our feet with a different layout — caller
+    // should treat the pool as compromised and stop writing.
+    bool RevalidateHeader() const;
     const char* LastError() const { return m_szError; }
 
 private:

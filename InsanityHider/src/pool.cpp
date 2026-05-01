@@ -85,4 +85,17 @@ bool Pool::IsManaged(int slot) const {
     return slots[slot] != 0;
 }
 
+bool Pool::IsActive() const {
+    if (!m_pBase) return false;
+    auto* p = reinterpret_cast<const uint32_t*>(
+        reinterpret_cast<const uint8_t*>(m_pBase) + POOL_ACTIVE_OFFSET);
+    return *p != 0;
+}
+
+bool Pool::RevalidateHeader() const {
+    if (!m_pBase) return false;
+    auto* u32 = reinterpret_cast<const uint32_t*>(m_pBase);
+    return u32[0] == POOL_MAGIC && u32[1] == POOL_VERSION;
+}
+
 } // namespace InsanityHider

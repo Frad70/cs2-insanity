@@ -104,5 +104,21 @@ public sealed class InsanityRevivePlugin : BasePlugin
                                 $"ping={fc.PingView.LastWrittenPing}ms " +
                                 $"profile=base{fc.Profile.BaseLatencyMs}/jit{fc.Profile.JitterRangeMs}");
         }
+        info.ReplyToCommand($"[Insanity] hider active={_manager.IsHiderActive()}");
+    }
+
+    [ConsoleCommand("insanity_hider_active", "Toggle InsanityHider BOT-icon hiding (0/1)")]
+    [RequiresPermissions("@css/generic")]
+    public void OnHiderActive(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        if (info.ArgCount < 2)
+        {
+            info.ReplyToCommand($"[Insanity] hider active={_manager.IsHiderActive()} (usage: insanity_hider_active 0|1)");
+            return;
+        }
+        bool on = info.GetArg(1).Trim() is "1" or "true" or "on";
+        _manager.SetHiderActive(on);
+        info.ReplyToCommand($"[Insanity] hider active={on}");
     }
 }

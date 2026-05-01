@@ -115,10 +115,17 @@ public sealed class FakeClientManager : IDisposable
         var idx = FindFreeSlot();
         if (idx < 0) { Log.Warn("Spawn: no free slot in [0..63]"); return; }
         _pool.Write(idx, 1);
-        Log.Info($"Spawn: pre-mark slot={idx} team={team} (FindFreeSlot used={string.Join(",", Utilities.GetPlayers().Where(c=>c!=null&&c.IsValid).Select(c=>c.Slot.ToString()))})");
         _commandSpawnsPending++;
         Server.ExecuteCommand(team == FakeTeam.CT ? "bot_add ct" : "bot_add t");
     }
+
+    public void SetHiderActive(bool active)
+    {
+        _pool.WriteActive(active);
+        Log.Info($"InsanityHider {(active ? "enabled" : "disabled")} (pool kill-switch)");
+    }
+
+    public bool IsHiderActive() => _pool.ReadActive();
 
     public void OnClientPutInServer(int slot)
     {
