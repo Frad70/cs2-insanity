@@ -127,6 +127,27 @@ public sealed class FakeClientManager : IDisposable
 
     public bool IsHiderActive() => _pool.ReadActive();
 
+    // Late-adopt: when a bot connects without our Spawn() pre-mark
+    // (engine_quota / autoteambalance / mp_warmup / manual bot_add),
+    // C++ Hider's OCC post-hook fires too early to see pool[slot]==1.
+    // We mark the pool here, between OCC and the C++ Hider's CPiS post-
+    // hook — the latter then fires with pool[slot]==1 and writes byte 160.
+    public void OnClientConnected(int slot)
+    {
+        try {
+            var c = Utilities.GetPlayerFromSlot(slot);
+            if (c == null || c.IsHLTV) return;
+            // Write the mark unconditionally for bots (or anything where
+            // we couldn't tell yet); idempotent. Real humans never reach
+            // this — they don't trigger OCC with bFakePlayer=1, and the
+            // C++ Hider's CPiS post-hook gates on type==1 anyway.
+            if (_pool.ReadActive() && _pool.Read(slot) == 0)
+            {
+                _pool.Write(slot, 1);
+            }
+        } catch (Exception ex) { Log.Error($"OnClientConnected slot={slot}: {ex.Message}"); }
+    }
+
     public void OnClientPutInServer(int slot)
     {
         try {

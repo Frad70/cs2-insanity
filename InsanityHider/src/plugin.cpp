@@ -44,6 +44,8 @@ constexpr int kFakePlayerOffset = 160;
 
 SH_DECL_HOOK6_void(IServerGameClients, OnClientConnected, SH_NOATTRIB, 0,
                    CPlayerSlot, const char*, uint64, const char*, const char*, bool);
+SH_DECL_HOOK4_void(IServerGameClients, ClientPutInServer, SH_NOATTRIB, 0,
+                   CPlayerSlot, char const*, int, uint64);
 
 InsanityHiderPlugin g_Plugin;
 PLUGIN_EXPOSE(InsanityHiderPlugin, g_Plugin);
@@ -96,6 +98,24 @@ void InsanityHiderPlugin::Hook_OnClientConnected_Post(CPlayerSlot slot, const ch
     RETURN_META(MRES_IGNORED);
 }
 
+void InsanityHiderPlugin::Hook_ClientPutInServer_Post(CPlayerSlot slot, char const* pszName,
+                                                      int type, uint64) {
+    if (m_bSelfDisabled) RETURN_META(MRES_IGNORED);
+    if (!m_Pool.IsActive()) RETURN_META(MRES_IGNORED);
+    if (type != 1) RETURN_META(MRES_IGNORED);  // not a fake-client
+    int idx = slot.Get();
+    if (idx < 0 || idx >= (int)InsanityHider::POOL_SLOTS) RETURN_META(MRES_IGNORED);
+    if (!m_Pool.IsManaged(idx)) RETURN_META(MRES_IGNORED);  // CSSharp didn't mark it
+
+    auto* pClient = ResolveClientBySlot(idx);
+    if (!pClient) RETURN_META(MRES_IGNORED);
+    auto* raw = reinterpret_cast<unsigned char*>(pClient);
+    if (raw[kFakePlayerOffset] != 0x01) RETURN_META(MRES_IGNORED);  // already hidden
+    raw[kFakePlayerOffset] = 0;
+    META_CONPRINTF("[InsanityHider] late-adopt slot=%d name=%s (CPiS)\n", idx, pszName ? pszName : "?");
+    RETURN_META(MRES_IGNORED);
+}
+
 void InsanityHiderPlugin::OnLevelInit(char const* pMapName, char const*, char const*,
                                       char const*, bool, bool) {
     // After mapchange, CServerSideClient instances are recreated with
@@ -127,6 +147,8 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
 
     SH_ADD_HOOK(IServerGameClients, OnClientConnected, gameclients,
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
+    SH_ADD_HOOK(IServerGameClients, ClientPutInServer, gameclients,
+                SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
 
     META_CONPRINTF("[InsanityHider] loaded — m_bFakePlayer offset=%d, kill-switch via pool[%zu]\n",
                    kFakePlayerOffset, InsanityHider::POOL_ACTIVE_OFFSET);
@@ -136,6 +158,8 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
 bool InsanityHiderPlugin::Unload(char* error, size_t maxlen) {
     SH_REMOVE_HOOK(IServerGameClients, OnClientConnected, gameclients,
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
+    SH_REMOVE_HOOK(IServerGameClients, ClientPutInServer, gameclients,
+                   SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
     m_Pool.Close();
     return true;
 }

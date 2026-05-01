@@ -19,6 +19,13 @@ public:
     void Hook_OnClientConnected_Post(CPlayerSlot slot, const char* pszName, uint64 xuid,
                                      const char* pszNetworkID, const char* pszAddress,
                                      bool bFakePlayer);
+
+    // Post-hook for ClientPutInServer. Fires after OCC. Used to catch
+    // late-adopted bots: those whose CSSharp Spawn() did NOT pre-mark
+    // the pool (engine-spawned). CSSharp pool.Write happens between OCC
+    // and CPiS via OnClientConnected listener; this hook then sees pool
+    // [slot]==1 and flips byte 160 just like the OCC path.
+    void Hook_ClientPutInServer_Post(CPlayerSlot slot, char const* pszName, int type, uint64 xuid);
     void OnLevelInit(char const* pMapName, char const*, char const*, char const*, bool, bool) override;
 
     const char* GetAuthor()      override { return "frad70"; }

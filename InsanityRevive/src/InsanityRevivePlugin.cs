@@ -41,6 +41,7 @@ public sealed class InsanityRevivePlugin : BasePlugin
             try { _manager?.OnMapStart(); }
             catch (Exception ex) { Log.Error($"OnMapStart: {ex.Message}"); }
         });
+        RegisterListener<Listeners.OnClientConnected>(slot => _manager?.OnClientConnected(slot));
         RegisterListener<Listeners.OnClientPutInServer>(slot => _manager?.OnClientPutInServer(slot));
         RegisterListener<Listeners.OnClientDisconnect>(slot => _manager?.OnClientDisconnect(slot));
 
