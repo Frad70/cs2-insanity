@@ -45,12 +45,33 @@ public sealed class InsanityRevivePlugin : BasePlugin
         RegisterListener<Listeners.OnClientPutInServer>(slot => _manager?.OnClientPutInServer(slot));
         RegisterListener<Listeners.OnClientDisconnect>(slot => _manager?.OnClientDisconnect(slot));
 
+        // P/12 Reveal Finale (v0.6.0-beta): EventPlayerDeath dispatches to
+        // RevealController for bot-kill counter (Stage 2 trigger threshold)
+        // and human-death detection (slowmo death cam in Stage 2 + Stage 3
+        // trigger when last human dies).
+        RegisterEventHandler<EventPlayerDeath>((@event, info) => {
+            try {
+                var victim = @event.Userid;
+                if (victim == null || !victim.IsValid) return HookResult.Continue;
+                var isBot = victim.IsBot
+                    || (_manager?.FindBySlot((int)victim.Slot) != null);
+                _manager?.Reveal.OnPlayerDeath((int)victim.Slot, isBot);
+            } catch (Exception ex) { Log.Debug($"EventPlayerDeath dispatch: {ex.Message}"); }
+            return HookResult.Continue;
+        });
+
         Log.Info($"loaded — telemetry={_telemetry.Path} session={_telemetry.SessionId} " +
                  $"detour={_manager.DetourInstalled} steamIdMode={_manager.SteamIds.Mode}");
 
         // Hot reload: OnClientPutInServer will not fire for bots that
         // are already on the server, so adopt them now in one pass.
-        if (hotReload) _manager.AdoptExistingBots();
+        if (hotReload) {
+            _manager.AdoptExistingBots();
+            // OnMapStart won't fire on hot-reload (map already loaded),
+            // so arm FleetManager directly. Reconcile will run from
+            // Tick at 1Hz and spawn up to FleetSize.
+            _manager.Fleet.OnMapStartComplete();
+        }
     }
 
     public override void Unload(bool hotReload)
@@ -106,6 +127,22 @@ public sealed class InsanityRevivePlugin : BasePlugin
                                 $"profile=base{fc.Profile.BaseLatencyMs}/jit{fc.Profile.JitterRangeMs}");
         }
         info.ReplyToCommand($"[Insanity] hider active={_manager.IsHiderActive()}");
+    }
+
+    // P/12 Reveal Finale entry. Two registrations:
+    //   - `insanity_reveal` — rcon / server console
+    //   - `css_reveal`      — chat trigger `!reveal` (CSSharp's css_ prefix
+    //                          maps `css_NAME` to `!NAME` chat command)
+    // Permission @css/root — admin-only.
+    [ConsoleCommand("insanity_reveal", "Trigger reveal finale state machine")]
+    [ConsoleCommand("css_reveal", "Trigger reveal finale state machine (chat: !reveal)")]
+    [RequiresPermissions("@css/root")]
+    public void OnReveal(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        var prevStage = _manager.Reveal.Stage;
+        _manager.Reveal.Start();
+        info.ReplyToCommand($"[Insanity] reveal: prev={prevStage} → Stage0");
     }
 
     [ConsoleCommand("insanity_hider_active", "Toggle InsanityHider BOT-icon hiding (0/1)")]
