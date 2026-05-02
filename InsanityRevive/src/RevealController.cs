@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Utils;
 
@@ -55,6 +56,17 @@ public sealed class RevealController
 
     /// <summary>Bots whose loadout we've forced — used for Stage 1 weapon-lock + Stage 3 restore.</summary>
     private readonly Dictionary<int, BotCombatState> _combatState = new();
+
+    /// <summary>
+    /// Pre-reveal value of <c>mp_teammates_are_enemies</c> captured at
+    /// Stage 1 entry. Without forcing this to 1, bots and a same-team
+    /// human deal 0 damage (verified empirically 2026-05-02 — survived
+    /// Stage 1 + Stage 2 on CT with CT-bots untouched, default
+    /// mp_friendlyfire=0). Restored exactly to its previous value at
+    /// CleanupReveal — `null` until first capture, so a back-to-back
+    /// CleanupReveal call before the first Stage 1 is a no-op.
+    /// </summary>
+    private bool? _prevTeammatesAreEnemies;
 
     private struct BotCombatState
     {
@@ -131,8 +143,23 @@ public sealed class RevealController
     {
         Stage = RevealStage.Stage1;
         _stageStartTick = Server.TickCount;
+
+        // Capture previous mp_teammates_are_enemies value before forcing
+        // it to 1, so CleanupReveal can restore exactly. If lookup fails
+        // (cvar missing or cast wrong), default to false (the engine's
+        // default) — restore would set 0 which is the safe path.
+        try {
+            var cv = ConVar.Find("mp_teammates_are_enemies");
+            _prevTeammatesAreEnemies = cv?.GetPrimitiveValue<bool>() ?? false;
+        } catch (Exception ex) {
+            Log.Debug($"EnterStage1 read mp_teammates_are_enemies: {ex.Message}");
+            _prevTeammatesAreEnemies = false;
+        }
+        Server.ExecuteCommand("mp_teammates_are_enemies 1");
+
         _mgr.Telemetry.Write("reveal_stage_enter", new Dictionary<string, object?> {
-            { "stage", "Stage1" } });
+            { "stage", "Stage1" },
+            { "prevTeammatesAreEnemies", _prevTeammatesAreEnemies } });
 
         Server.PrintToChatAll($" {ChatColors.DarkRed}[INSANITY] reveal initiated");
 
@@ -246,6 +273,14 @@ public sealed class RevealController
     {
         try {
             Server.ExecuteCommand("host_timescale 1.0");
+            // Restore mp_teammates_are_enemies to its pre-reveal value.
+            // null = never captured (Stage 0 or Idle re-trigger before
+            // ever reaching Stage 1) — leave the cvar alone.
+            if (_prevTeammatesAreEnemies.HasValue) {
+                var prev = _prevTeammatesAreEnemies.Value ? 1 : 0;
+                Server.ExecuteCommand($"mp_teammates_are_enemies {prev}");
+                _prevTeammatesAreEnemies = null;
+            }
             foreach (var fc in _mgr.All) RestoreNormalLoadout(fc);
             _combatState.Clear();
         } catch (Exception ex) { Log.Error($"CleanupReveal: {ex.Message}"); }
