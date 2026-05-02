@@ -58,15 +58,22 @@ public sealed class RevealController
     private readonly Dictionary<int, BotCombatState> _combatState = new();
 
     /// <summary>
-    /// Pre-reveal value of <c>mp_teammates_are_enemies</c> captured at
-    /// Stage 1 entry. Without forcing this to 1, bots and a same-team
-    /// human deal 0 damage (verified empirically 2026-05-02 — survived
-    /// Stage 1 + Stage 2 on CT with CT-bots untouched, default
-    /// mp_friendlyfire=0). Restored exactly to its previous value at
-    /// CleanupReveal — `null` until first capture, so a back-to-back
-    /// CleanupReveal call before the first Stage 1 is a no-op.
+    /// Pre-reveal value of <c>mp_teammates_are_enemies</c> — captured
+    /// at Stage 1 entry, restored exactly at CleanupReveal. v0.6.0.1
+    /// forced this to 1, but the side-effect (bots target each other,
+    /// fleet self-mulches in 30s) made it unworkable. v0.6.0.2 reverts
+    /// to natural CT-vs-T combat — see Stage 1 doc for the design.
     /// </summary>
     private bool? _prevTeammatesAreEnemies;
+
+    /// <summary>
+    /// Pre-reveal value of <c>mp_solid_teammates</c>. Forced to 0 at
+    /// Stage 1 entry so the bot swarm can pile through each other
+    /// without collision (otherwise teleport-on-top-of-human stacks
+    /// and ejects bots in random directions). Restored exactly at
+    /// CleanupReveal.
+    /// </summary>
+    private bool? _prevSolidTeammates;
 
     private struct BotCombatState
     {
@@ -137,33 +144,138 @@ public sealed class RevealController
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Stage 1 — knife rush
+    // Stage 1 — knife rush (swarm)
     // ──────────────────────────────────────────────────────────────────
+    //
+    // Design (v0.6.0.2-beta): natural CT-vs-T combat — all bots flipped
+    // to the opposite team of the (first) living human, then teleported
+    // to a tight cluster around the human centroid. Bot AI sees only
+    // humans as enemies (default mp_teammates_are_enemies=0), so they
+    // converge on humans without internal fighting. mp_solid_teammates=0
+    // lets the swarm pile through each other without colliding.
+    //
+    // Sequence:
+    //   1. Capture cvars (mp_teammates_are_enemies, mp_solid_teammates).
+    //   2. Force defaults (=0) and mp_solid_teammates=0.
+    //   3. Pre-flip all bots to opposite team via SwitchTeam().
+    //   4. mp_restartgame 1 — clean round, all respawn at spawn points
+    //      with new team affiliation honored.
+    //   5. After 5-tick-second settle: detect human centroid, teleport
+    //      bots to (centroid.X+offset, centroid.Y+offset, centroid.Z),
+    //      then strip+knife+speed-boost.
+    //
+    // Edge case: zero living humans at swarm time → skip teleport, run
+    // knife rush in default spawn positions (bots wander).
     private void EnterStage1()
     {
         Stage = RevealStage.Stage1;
         _stageStartTick = Server.TickCount;
 
-        // Capture previous mp_teammates_are_enemies value before forcing
-        // it to 1, so CleanupReveal can restore exactly. If lookup fails
-        // (cvar missing or cast wrong), default to false (the engine's
-        // default) — restore would set 0 which is the safe path.
+        // (1) Capture cvars to restore at CleanupReveal.
         try {
-            var cv = ConVar.Find("mp_teammates_are_enemies");
-            _prevTeammatesAreEnemies = cv?.GetPrimitiveValue<bool>() ?? false;
-        } catch (Exception ex) {
-            Log.Debug($"EnterStage1 read mp_teammates_are_enemies: {ex.Message}");
-            _prevTeammatesAreEnemies = false;
-        }
-        Server.ExecuteCommand("mp_teammates_are_enemies 1");
+            _prevTeammatesAreEnemies = ConVar.Find("mp_teammates_are_enemies")?.GetPrimitiveValue<bool>() ?? false;
+        } catch { _prevTeammatesAreEnemies = false; }
+        try {
+            _prevSolidTeammates = ConVar.Find("mp_solid_teammates")?.GetPrimitiveValue<bool>() ?? true;
+        } catch { _prevSolidTeammates = true; }
+
+        // (2) Force cvars: default targeting (bots respect team), no
+        //     teammate collision (swarm pile-up).
+        Server.ExecuteCommand("mp_teammates_are_enemies 0");
+        Server.ExecuteCommand("mp_solid_teammates 0");
 
         _mgr.Telemetry.Write("reveal_stage_enter", new Dictionary<string, object?> {
             { "stage", "Stage1" },
-            { "prevTeammatesAreEnemies", _prevTeammatesAreEnemies } });
+            { "prevTeammatesAreEnemies", _prevTeammatesAreEnemies },
+            { "prevSolidTeammates", _prevSolidTeammates } });
 
         Server.PrintToChatAll($" {ChatColors.DarkRed}[INSANITY] reveal initiated");
 
-        foreach (var fc in _mgr.All) ApplyKnifeRush(fc);
+        // (3) Determine bot target team = opposite of human's team. If
+        //     no humans, default to T (2) — bots will be on T, no humans
+        //     to fight, knife-rush plays out as wandering chaos.
+        var humans = LivingHumanControllers();
+        int humanTeam = humans.Count > 0 ? (int)humans[0].TeamNum : 3;  // default human=CT
+        int botTeam = humanTeam == 2 ? 3 : 2;  // opposite
+
+        // Pre-flip teams BEFORE mp_restartgame so respawn at restart uses
+        // the new team's spawn points.
+        foreach (var fc in _mgr.All) {
+            try {
+                var c = Utilities.GetPlayerFromSlot(fc.Slot);
+                if (c != null && c.IsValid)
+                    c.SwitchTeam((CsTeam)botTeam);
+            } catch (Exception ex) { Log.Debug($"SwitchTeam slot={fc.Slot}: {ex.Message}"); }
+        }
+
+        // (4) Clean round restart for fresh respawn state.
+        Server.ExecuteCommand("mp_restartgame 1");
+
+        // (5) After respawn settles: teleport swarm to human centroid,
+        //     then apply knife rush. 5 sec covers the 1-sec mp_restart
+        //     delay + 1-sec round restart processing + 3-sec respawn buffer.
+        Server.RunOnTick(Server.TickCount + 64 * 5, () => {
+            if (Stage != RevealStage.Stage1) return;  // re-trigger guarded
+            DeploySwarmAndKnifeRush();
+        });
+    }
+
+    private void DeploySwarmAndKnifeRush()
+    {
+        var humansNow = LivingHumanControllers();
+        Vector? centroid = humansNow.Count > 0 ? ComputeCentroid(humansNow) : null;
+
+        var bots = _mgr.All.ToList();
+        for (int i = 0; i < bots.Count; i++) {
+            var fc = bots[i];
+            try {
+                var c = Utilities.GetPlayerFromSlot(fc.Slot);
+                if (c == null || !c.IsValid) continue;
+                var pawn = c.PlayerPawn?.Value;
+                if (pawn == null || !pawn.IsValid) continue;
+                if (pawn.LifeState != 0) continue;  // dead bot — skip swarm-tp
+
+                // Teleport with small stagger so bots are clustered, not
+                // stacked at a single point. mp_solid_teammates=0 allows
+                // overlap, but visual variation looks better. Stagger
+                // pattern: 4-wide rows, ±1.5 unit spread.
+                if (centroid != null) {
+                    float dx = (i % 4) - 1.5f;
+                    float dy = (i / 4) - 1.0f;
+                    var pos = new Vector(centroid.X + dx, centroid.Y + dy, centroid.Z);
+                    pawn.Teleport(pos, pawn.AbsRotation, new Vector(0, 0, 0));
+                }
+
+                ApplyKnifeRush(fc);
+            } catch (Exception ex) { Log.Error($"DeploySwarm slot={fc.Slot}: {ex.Message}"); }
+        }
+    }
+
+    private List<CCSPlayerController> LivingHumanControllers()
+    {
+        var list = new List<CCSPlayerController>();
+        foreach (var c in Utilities.GetPlayers()) {
+            if (c == null || !c.IsValid || c.IsHLTV) continue;
+            if (_mgr.FindBySlot((int)c.Slot) != null) continue;  // managed bot
+            var pawn = c.PlayerPawn?.Value;
+            if (pawn == null || !pawn.IsValid) continue;
+            if (pawn.LifeState != 0) continue;
+            list.Add(c);
+        }
+        return list;
+    }
+
+    private static Vector ComputeCentroid(List<CCSPlayerController> humans)
+    {
+        float sx = 0, sy = 0, sz = 0;
+        int n = 0;
+        foreach (var h in humans) {
+            var p = h.PlayerPawn?.Value;
+            if (p?.AbsOrigin == null) continue;
+            sx += p.AbsOrigin.X; sy += p.AbsOrigin.Y; sz += p.AbsOrigin.Z;
+            n++;
+        }
+        return n == 0 ? new Vector(0, 0, 0) : new Vector(sx / n, sy / n, sz / n);
     }
 
     private void ApplyKnifeRush(FakeClient fc)
@@ -273,13 +385,16 @@ public sealed class RevealController
     {
         try {
             Server.ExecuteCommand("host_timescale 1.0");
-            // Restore mp_teammates_are_enemies to its pre-reveal value.
-            // null = never captured (Stage 0 or Idle re-trigger before
-            // ever reaching Stage 1) — leave the cvar alone.
+            // Restore captured cvars. null = never captured (Stage 0 or
+            // Idle re-trigger before ever reaching Stage 1) — leave cvar
+            // alone.
             if (_prevTeammatesAreEnemies.HasValue) {
-                var prev = _prevTeammatesAreEnemies.Value ? 1 : 0;
-                Server.ExecuteCommand($"mp_teammates_are_enemies {prev}");
+                Server.ExecuteCommand($"mp_teammates_are_enemies {(_prevTeammatesAreEnemies.Value ? 1 : 0)}");
                 _prevTeammatesAreEnemies = null;
+            }
+            if (_prevSolidTeammates.HasValue) {
+                Server.ExecuteCommand($"mp_solid_teammates {(_prevSolidTeammates.Value ? 1 : 0)}");
+                _prevSolidTeammates = null;
             }
             foreach (var fc in _mgr.All) RestoreNormalLoadout(fc);
             _combatState.Clear();

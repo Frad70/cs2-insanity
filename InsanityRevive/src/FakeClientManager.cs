@@ -119,6 +119,7 @@ public sealed class FakeClientManager : IDisposable
     public bool IsMapchangeInProgress => _pool.IsMapchangeInProgress();
     public FleetManager Fleet { get; private set; } = null!;
     public RevealController Reveal { get; private set; } = null!;
+    public BotDamagePatch DamagePatch { get; private set; } = null!;
 
     public FakeClientManager(Config cfg, Telemetry telemetry)
     {
@@ -129,6 +130,7 @@ public sealed class FakeClientManager : IDisposable
         _registry = new PersonaRegistry();
         Fleet = new FleetManager(this);
         Reveal = new RevealController(this);
+        DamagePatch = new BotDamagePatch(this);
     }
 
     /// <summary>FakeClient lookup by slot — used by RevealController.</summary>
@@ -168,6 +170,13 @@ public sealed class FakeClientManager : IDisposable
             { "steamIdMode", SteamIds.Mode }, { "csVersion", csVersion },
             { "personaRegistryCount", _registry.Count },
             { "personaRegistryPath", _registry.Path } });
+
+        // BotDamagePatch INTENTIONALLY NOT INSTALLED in v0.6.0.2 path.
+        // User clarified: damage masking is the wrong axis — bots still
+        // VISUALLY engage each other (chase, shoot, miss humans), which
+        // ruins the "horde focused on you" reveal feel. Need AI-level
+        // targeting override so bots don't even SEE other bots as
+        // candidates. Investigation in progress.
     }
 
     public void OnUnload()
