@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#include <dlfcn.h>
 
 #include <iserver.h>
 #include <eiface.h>
@@ -42,6 +45,12 @@ constexpr int kClientListOffset = 74 * 8;
 // human (0x00) to confirm.
 constexpr int kFakePlayerOffset = 160;
 
+// CServerSideClient::m_Name offset (CUtlString = 8-byte char* m_pString).
+// Reference header had it at 80; -16 shift yields 64. Validated probe
+// (offset=64 → 'Mangos' for live bot 'Mangos'). Treat as immutable for
+// this CS2 build; if engine layout changes, re-probe.
+constexpr int kNameOffset = 64;
+
 SH_DECL_HOOK6_void(IServerGameClients, OnClientConnected, SH_NOATTRIB, 0,
                    CPlayerSlot, const char*, uint64, const char*, const char*, bool);
 SH_DECL_HOOK4_void(IServerGameClients, ClientPutInServer, SH_NOATTRIB, 0,
@@ -64,6 +73,18 @@ static CServerSideClient* ResolveClientBySlot(int slot) {
     int count = clientList->Count();
     if (count < 0 || count > 256 || slot < 0 || slot >= count) return nullptr;
     return clientList->Element(slot);
+}
+
+// Overwrite engine-side m_Name (CUtlString) at offset 64. Calls the
+// engine's CUtlString::Set so the heap allocation is managed correctly.
+// No-op if dlsym failed at Load() (m_pUtlStringSet == nullptr). Returns
+// the m_pString readback after the call (or nullptr if disabled / no-op),
+// so the caller can verify the write took.
+static const char* OverwriteEngineName(InsanityHiderPlugin* plugin, void* pClient, const char* newName) {
+    if (!plugin->m_pUtlStringSet || !pClient || !newName || !newName[0]) return nullptr;
+    void* pUtlString = reinterpret_cast<unsigned char*>(pClient) + kNameOffset;
+    plugin->m_pUtlStringSet(pUtlString, newName);
+    return *reinterpret_cast<const char**>(pUtlString);  // CUtlString::m_pString at offset 0
 }
 
 void InsanityHiderPlugin::Hook_OnClientConnected_Post(CPlayerSlot slot, const char* pszName, uint64,
@@ -94,7 +115,14 @@ void InsanityHiderPlugin::Hook_OnClientConnected_Post(CPlayerSlot slot, const ch
     auto* raw = reinterpret_cast<unsigned char*>(pClient);
     if (raw[kFakePlayerOffset] != 0x01) RETURN_META(MRES_IGNORED);  // idempotent
     raw[kFakePlayerOffset] = 0;
-    META_CONPRINTF("[InsanityHider] wrote 0x00 slot=%d name=%s\n", idx, pszName ? pszName : "?");
+
+    // Overwrite m_Name from pool persona, if CSSharp wrote one.
+    const char* persona = m_Pool.GetName(idx);
+    const char* readback = persona ? OverwriteEngineName(this, pClient, persona) : nullptr;
+
+    META_CONPRINTF("[InsanityHider] wrote 0x00 slot=%d engineName=%s persona=%s readback=%s\n",
+                   idx, pszName ? pszName : "?", persona ? persona : "<none>",
+                   readback ? readback : "<n/a>");
     RETURN_META(MRES_IGNORED);
 }
 
@@ -110,9 +138,22 @@ void InsanityHiderPlugin::Hook_ClientPutInServer_Post(CPlayerSlot slot, char con
     auto* pClient = ResolveClientBySlot(idx);
     if (!pClient) RETURN_META(MRES_IGNORED);
     auto* raw = reinterpret_cast<unsigned char*>(pClient);
-    if (raw[kFakePlayerOffset] != 0x01) RETURN_META(MRES_IGNORED);  // already hidden
-    raw[kFakePlayerOffset] = 0;
-    META_CONPRINTF("[InsanityHider] late-adopt slot=%d name=%s (CPiS)\n", idx, pszName ? pszName : "?");
+
+    bool wroteByte = (raw[kFakePlayerOffset] == 0x01);
+    if (wroteByte) raw[kFakePlayerOffset] = 0;
+
+    // Overwrite m_Name from pool persona for managed slot. Re-applied here
+    // (in addition to OCC path) because the engine re-stamps bot names
+    // from bot_names.txt during post-spawn — CPiS is later in the chain
+    // and outlasts that stamp.
+    const char* persona = m_Pool.GetName(idx);
+    const char* readback = persona ? OverwriteEngineName(this, pClient, persona) : nullptr;
+
+    if (wroteByte || persona) {
+        META_CONPRINTF("[InsanityHider] late-adopt slot=%d engineName=%s persona=%s readback=%s (CPiS)\n",
+                       idx, pszName ? pszName : "?", persona ? persona : "<none>",
+                       readback ? readback : "<n/a>");
+    }
     RETURN_META(MRES_IGNORED);
 }
 
@@ -145,6 +186,23 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
         META_CONPRINTF("[InsanityHider] pool mapped (%zu slots)\n", InsanityHider::POOL_SLOTS);
     }
 
+    // Resolve CUtlString::Set from libtier0 for engine-side name overwrite.
+    // RTLD_NOLOAD first — engine has already loaded libtier0; we just want
+    // a handle for dlsym. Fallback: regular dlopen if NOLOAD returns null.
+    m_pTier0 = dlopen("libtier0.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!m_pTier0) m_pTier0 = dlopen("libtier0.so", RTLD_NOW);
+    if (m_pTier0) {
+        m_pUtlStringSet = reinterpret_cast<CUtlStringSetFn>(
+            dlsym(m_pTier0, "_ZN10CUtlString3SetEPKc"));
+    }
+    if (!m_pUtlStringSet) {
+        META_CONPRINTF("[InsanityHider] warning: CUtlString::Set unresolved (%s) — name overwrite disabled, byte 160 only\n",
+                       dlerror() ? dlerror() : "no tier0 handle");
+    } else {
+        META_CONPRINTF("[InsanityHider] CUtlString::Set resolved at %p — name overwrite enabled\n",
+                       (void*)m_pUtlStringSet);
+    }
+
     SH_ADD_HOOK(IServerGameClients, OnClientConnected, gameclients,
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
     SH_ADD_HOOK(IServerGameClients, ClientPutInServer, gameclients,
@@ -161,5 +219,6 @@ bool InsanityHiderPlugin::Unload(char* error, size_t maxlen) {
     SH_REMOVE_HOOK(IServerGameClients, ClientPutInServer, gameclients,
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
     m_Pool.Close();
+    if (m_pTier0) { dlclose(m_pTier0); m_pTier0 = nullptr; m_pUtlStringSet = nullptr; }
     return true;
 }

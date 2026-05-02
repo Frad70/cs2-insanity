@@ -98,4 +98,11 @@ bool Pool::RevalidateHeader() const {
     return u32[0] == POOL_MAGIC && u32[1] == POOL_VERSION;
 }
 
+const char* Pool::GetName(int slot) const {
+    if (!m_pBase) return nullptr;
+    if (slot < 0 || slot >= (int)POOL_SLOTS) return nullptr;
+    auto* p = reinterpret_cast<const char*>(m_pBase) + POOL_NAMES_OFFSET + slot * POOL_NAME_BYTES;
+    return p[0] ? p : nullptr;
+}
+
 } // namespace InsanityHider

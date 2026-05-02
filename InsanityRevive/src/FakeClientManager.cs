@@ -137,15 +137,21 @@ public sealed class FakeClientManager : IDisposable
         try {
             var c = Utilities.GetPlayerFromSlot(slot);
             if (c == null || c.IsHLTV) return;
-            // Mark pool only for bots — gate on c.IsBot here (m_bFakePlayer
-            // still 0x01 at this point for engine-spawned, since C++ Hider
-            // OCC post-hook skips them; Spawn() pre-marked path already has
-            // pool[slot]=1 so the write is idempotent). Humans never hit
-            // this branch (c.IsBot=False) and stay unmarked.
+            // Mark pool only for bots — gate on c.IsBot (m_bFakePlayer still
+            // 0x01 here for engine-spawned, since C++ Hider OCC post-hook
+            // skips them; Spawn() pre-marked path already has pool[slot]=1
+            // so the write is idempotent). Humans never hit this branch.
             if (!c.IsBot) return;
-            if (_pool.ReadActive() && _pool.Read(slot) == 0)
+            if (!_pool.ReadActive()) return;
+            if (_pool.Read(slot) == 0) _pool.Write(slot, 1);
+            // Publish persona name BEFORE C++ Hider's CPiS post-hook fires.
+            // The hook reads pool.GetName(slot) and calls CUtlString::Set on
+            // engine-side m_Name. AdoptController runs later (in OnClient
+            // PutInServer listener); it will read the same name back and use
+            // it for Schema overwrite, keeping engine and Schema in sync.
+            if (string.IsNullOrEmpty(_pool.ReadName(slot)))
             {
-                _pool.Write(slot, 1);
+                _pool.WriteName(slot, PickName(_nextId));
             }
         } catch (Exception ex) { Log.Error($"OnClientConnected slot={slot}: {ex.Message}"); }
     }
@@ -196,7 +202,12 @@ public sealed class FakeClientManager : IDisposable
         var id = _nextId++;
         var team = restore?.Team ?? (ctrl.TeamNum == 3 ? FakeTeam.CT : FakeTeam.T);
         bool restored = restore != null;
-        var name    = restored ? restore!.Name    : PickName(id);
+        // Prefer the name CSSharp's OnClientConnected listener wrote into the
+        // pool (so engine-side m_Name and our Schema overwrite agree). Fall
+        // back to PickName(id) only if the pool slot wasn't pre-named.
+        var poolName = _pool.ReadName(ctrl.Slot);
+        var name    = restored ? restore!.Name
+                              : (string.IsNullOrEmpty(poolName) ? PickName(id) : poolName);
         var steamId = restored ? restore!.SteamId : SteamIds.Generate(ctrl.Slot);
         var profile = restored ? restore!.Profile : NetworkProfile.Generate(steamId);
         var source = _commandSpawnsPending > 0 ? "command" : "engine_quota";
@@ -205,6 +216,10 @@ public sealed class FakeClientManager : IDisposable
             { Slot = ctrl.Slot, Alive = true };
         _byId[id] = fc;
         _usedSteamIds.Add(steamId);
+        // Publish persona name into pool so C++ Hider can call CUtlString::
+        // Set on engine-side m_Name. Kills the engine vs Schema mismatch
+        // that drove the BOT-icon fallback in the Panorama scoreboard.
+        _pool.WriteName(ctrl.Slot, name);
         fc.OverwriteIdentityOnController(ctrl);
 
         // Engine re-stamps name from bot_names.txt during post-spawn;
@@ -238,6 +253,7 @@ public sealed class FakeClientManager : IDisposable
         if (!_byId.TryGetValue(id, out var fc)) return;
         _byId.Remove(id);
         _pool.Write(fc.Slot, 0);  // un-mark so future engine clients aren't accidentally hidden
+        _pool.WriteName(fc.Slot, "");
         Telemetry.Write("fake_despawn", new Dictionary<string, object?> {
             { "botId", id }, { "reason", reason }, { "name", fc.Name }, { "slot", fc.Slot } });
         try {
