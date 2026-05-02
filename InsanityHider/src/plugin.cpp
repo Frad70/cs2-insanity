@@ -58,6 +58,13 @@ SH_DECL_HOOK6_void(IServerGameClients, OnClientConnected, SH_NOATTRIB, 0,
 SH_DECL_HOOK4_void(IServerGameClients, ClientPutInServer, SH_NOATTRIB, 0,
                    CPlayerSlot, char const*, int, uint64);
 SH_DECL_HOOK1(IVEngineServer, CreateFakeClient, SH_NOATTRIB, 0, CPlayerSlot, const char*);
+// Parameterized variant on INetworkGameServer (parent of CNetworkGameServerBase).
+// Engine logs "CNetworkServerService::StartChangeLevel( (no landmark) )" at this
+// call-site, then disconnects clients in the same code path. PRE-hooking here
+// catches BEFORE the disconnect cascade.
+class INetworkGameClient;  // forward decl matching iserver.h
+SH_DECL_HOOK3(INetworkGameServer, StartChangeLevel, SH_NOATTRIB, 0,
+              CUtlVector<INetworkGameClient*>*, const char*, const char*, void*);
 
 // In-flight set of personas we issued via CFC PRE override but haven't yet
 // seen at OCC. OCC handler matches incoming pszName here to decide whether
@@ -224,7 +231,80 @@ void InsanityHiderPlugin::OnLevelInit(char const* pMapName, char const*, char co
     // auto-spawns — FakeClientManager re-issues bot_add for each pool
     // slot, and OnClientConnected fires per-bot as expected. Nothing
     // to do here; just log for cross-reference with telemetry.
+    //
+    // We DON'T clear mapchange flag here — CSSharp OnMapStart owns the
+    // clear, after snapshotting active personas. OnLevelInit fires
+    // before CSSharp's StartupServer hook in the engine-Metamod-CSSharp
+    // chain, so clearing here would let synthetic OnClientDisconnects
+    // through.
+
+    // StartChangeLevel hook re-registration. GetIGameServer() returns null
+    // at plugin Load(). Engine may also re-create the game server instance
+    // across mapchanges (verified empirically — hook registered at boot
+    // didn't fire on the next user-issued changelevel). On every
+    // OnLevelInit, check the current pointer; if it changed, remove from
+    // the old instance and add to the new one.
+    {
+        auto* gameServer = g_pNetworkServerService ? g_pNetworkServerService->GetIGameServer() : nullptr;
+        if (gameServer && gameServer != m_pHookedGameServer) {
+            if (m_pHookedGameServer) {
+                SH_REMOVE_HOOK_MEMFUNC(INetworkGameServer, StartChangeLevel,
+                                       (INetworkGameServer*)m_pHookedGameServer, this,
+                                       &InsanityHiderPlugin::Hook_StartChangeLevel_Pre, false);
+                META_CONPRINTF("[InsanityHider] StartChangeLevel hook removed from stale instance %p\n",
+                               m_pHookedGameServer);
+            }
+            SH_ADD_HOOK_MEMFUNC(INetworkGameServer, StartChangeLevel, gameServer,
+                                this, &InsanityHiderPlugin::Hook_StartChangeLevel_Pre, false /* PRE */);
+            m_pHookedGameServer = (void*)gameServer;
+            META_CONPRINTF("[InsanityHider] StartChangeLevel hook registered on game server %p\n",
+                           (void*)gameServer);
+        } else if (!gameServer) {
+            META_CONPRINTF("[InsanityHider] warning: GetIGameServer() null at OnLevelInit — retry next map\n");
+        }
+    }
+
     META_CONPRINTF("[InsanityHider] OnLevelInit map=%s\n", pMapName ? pMapName : "?");
+}
+
+CUtlVector<INetworkGameClient*>* InsanityHiderPlugin::Hook_StartChangeLevel_Pre(
+    const char* mapName, const char* landmark, void* /*changelevelState*/)
+{
+    // PRIMARY mapchange hook. INetworkGameServer::StartChangeLevel(name,
+    // landmark, *) is called by the engine at the start of the changelevel
+    // sequence — BEFORE clients are deactivated. PRE-hook fires before the
+    // body, so the shm flag is latched before any synthetic OnClientDisconnect
+    // cascade reaches CSSharp.
+    //
+    // First-run regression (v0.5.1, 2026-05-02) confirmed earlier hook on
+    // the void variant of INetworkServerService::StartChangeLevel fired
+    // AFTER disconnects. The parameterized variant on INetworkGameServer
+    // is the actual entry point.
+    if (m_bSelfDisabled || !m_Pool.IsOpen()) {
+        META_CONPRINTF("[InsanityHider] StartChangeLevel PRE — pool unavailable, flag NOT set\n");
+        RETURN_META_VALUE(MRES_IGNORED, nullptr);
+    }
+    m_Pool.WriteMapchangeFlag(true);
+    g_ExpectedNames.clear();
+    META_CONPRINTF("[InsanityHider] StartChangeLevel PRE — mapchange flag latched (map='%s' landmark='%s')\n",
+                   mapName ? mapName : "?", landmark ? landmark : "");
+    RETURN_META_VALUE(MRES_IGNORED, nullptr);
+}
+
+void InsanityHiderPlugin::OnLevelShutdown() {
+    // SECONDARY (belt-and-braces). Fires AFTER the LoopDeactivate cascade
+    // — verified empirically: server.log line 874 vs 858 for disconnect.
+    // By then CSSharp has already wiped its bot state, so this is too
+    // late to gate the disconnect cascade. We still latch the flag in
+    // case some future mapchange path bypasses StartChangeLevel and goes
+    // directly through LevelShutdown — costs nothing.
+    if (m_bSelfDisabled || !m_Pool.IsOpen()) {
+        META_CONPRINTF("[InsanityHider] OnLevelShutdown — pool unavailable\n");
+        return;
+    }
+    m_Pool.WriteMapchangeFlag(true);
+    g_ExpectedNames.clear();
+    META_CONPRINTF("[InsanityHider] OnLevelShutdown — mapchange flag latched (secondary)\n");
 }
 
 bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late) {
@@ -269,6 +349,10 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
     SH_ADD_HOOK(IVEngineServer, CreateFakeClient, engine,
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_CreateFakeClient_Pre), false /* PRE */);
+    // StartChangeLevel hook registration is DEFERRED to first OnLevelInit —
+    // GetIGameServer() returns null at plugin Load() time (game server not
+    // yet created). After the engine creates it via StartupServer, OnLevelInit
+    // fires and we register there (gated by m_bChangeLevelHookRegistered).
 
     META_CONPRINTF("[InsanityHider] loaded — m_bFakePlayer offset=%d, kill-switch via pool[%zu]\n",
                    kFakePlayerOffset, InsanityHider::POOL_ACTIVE_OFFSET);
@@ -282,6 +366,12 @@ bool InsanityHiderPlugin::Unload(char* error, size_t maxlen) {
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
     SH_REMOVE_HOOK(IVEngineServer, CreateFakeClient, engine,
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_CreateFakeClient_Pre), false);
+    if (m_pHookedGameServer) {
+        SH_REMOVE_HOOK_MEMFUNC(INetworkGameServer, StartChangeLevel,
+                               (INetworkGameServer*)m_pHookedGameServer, this,
+                               &InsanityHiderPlugin::Hook_StartChangeLevel_Pre, false);
+        m_pHookedGameServer = nullptr;
+    }
     m_Pool.Close();
     if (m_pTier0) { dlclose(m_pTier0); m_pTier0 = nullptr; m_pUtlStringSet = nullptr; }
     return true;

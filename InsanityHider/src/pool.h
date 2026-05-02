@@ -3,6 +3,10 @@
 // personas to the FIFO). C++ also writes managed/name when CFC PRE override
 // fires — at OCC time the slot is known and we mark it ourselves so CSSharp
 // doesn't have to predict it.
+//
+// v4 (mapchange survival): C++ writes mapchangeFlag at OnLevelShutdown;
+// CSSharp reads it at OnClientDisconnect to skip Despawn during the engine's
+// synthetic disconnect cascade, then clears at OnMapStart after snapshotting.
 
 #pragma once
 
@@ -17,12 +21,14 @@ public:
     bool IsOpen() const { return m_pBase != nullptr; }
     bool IsManaged(int slot) const;
     bool IsActive() const;
+    bool IsMapchangeInProgress() const;
     bool RevalidateHeader() const;
     const char* GetName(int slot) const;
 
     // Writes (writable mmap, v3+).
     void WriteManaged(int slot, uint8_t val);
     void WriteName(int slot, const char* name);
+    void WriteMapchangeFlag(bool inProgress);
     // Pop one pending persona from the FIFO. Copies into outBuf (always
     // null-terminates). Returns true if a name was popped, false if FIFO empty.
     bool PopFifo(char* outBuf, size_t outBufBytes);

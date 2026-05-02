@@ -55,7 +55,8 @@ bool Pool::Open(const char* path) {
     }
     if (version != POOL_VERSION) {
         snprintf(m_szError, sizeof(m_szError),
-                 "version mismatch: got %u want %u", version, POOL_VERSION);
+                 "version mismatch: got %u want %u (delete pool file before v4 deploy)",
+                 version, POOL_VERSION);
         munmap(base, POOL_TOTAL);
         Close();
         return false;
@@ -93,6 +94,13 @@ bool Pool::IsActive() const {
     return *p != 0;
 }
 
+bool Pool::IsMapchangeInProgress() const {
+    if (!m_pBase) return false;
+    auto* p = reinterpret_cast<const std::atomic<uint32_t>*>(
+        reinterpret_cast<const uint8_t*>(m_pBase) + POOL_MAPCHANGE_OFFSET);
+    return p->load(std::memory_order_acquire) != 0;
+}
+
 bool Pool::RevalidateHeader() const {
     if (!m_pBase) return false;
     auto* u32 = reinterpret_cast<const uint32_t*>(m_pBase);
@@ -125,6 +133,13 @@ void Pool::WriteName(int slot, const char* name) {
     memcpy(dst, name, n);
     dst[n] = '\0';
     if (n + 1 < POOL_NAME_BYTES) memset(dst + n + 1, 0, POOL_NAME_BYTES - n - 1);
+}
+
+void Pool::WriteMapchangeFlag(bool inProgress) {
+    if (!m_pBase) return;
+    auto* p = reinterpret_cast<std::atomic<uint32_t>*>(
+        reinterpret_cast<uint8_t*>(m_pBase) + POOL_MAPCHANGE_OFFSET);
+    p->store(inProgress ? 1u : 0u, std::memory_order_release);
 }
 
 bool Pool::PopFifo(char* outBuf, size_t outBufBytes) {
