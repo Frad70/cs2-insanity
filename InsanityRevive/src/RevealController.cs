@@ -59,6 +59,39 @@ public sealed class RevealController
     private readonly Dictionary<int, BotCombatState> _combatState = new();
 
     /// <summary>
+    /// Pre-reveal team membership per bot slot. Captured at Stage 1
+    /// entry BEFORE any team flip; restored at CleanupReveal so the
+    /// fleet returns to whatever T/CT distribution it had before reveal.
+    /// Bots that get bounced to spectator due to team-cap overflow also
+    /// have their original team recorded here for clean restore.
+    /// </summary>
+    private readonly Dictionary<int, int> _botPrevTeams = new();
+
+    /// <summary>
+    /// CS2 competitive 5v5 team cap. Per-team max, including humans.
+    /// Hardcoded for v0.6.0.5 — if `+game_alias` ever changes from
+    /// competitive to deathmatch/etc, revisit. Bots beyond this cap
+    /// get sent to spectator at Stage 1 entry; they re-join their
+    /// original team at CleanupReveal.
+    /// </summary>
+    private const int TeamCap = 5;
+
+    /// <summary>
+    /// Stage 1 minimum duration. Hard gate before Stage 2 can fire,
+    /// regardless of how many bots have died. Prevents pathologically
+    /// short Stage 1 (e.g. 4 bots die in 10 sec → Stage 2 immediately,
+    /// felt rushed). User-spec v0.6.0.5: 30 sec minimum.
+    /// </summary>
+    private const int Stage1MinDurationSec = 30;
+
+    /// <summary>
+    /// Stage 1 maximum duration. Hard cap; Stage 2 fires regardless of
+    /// kill count once this elapses. Prevents Stage 1 dragging out if
+    /// bots can't reach humans (open map, human in safe spot).
+    /// </summary>
+    private const int Stage1MaxDurationSec = 60;
+
+    /// <summary>
     /// Pre-reveal value of <c>mp_teammates_are_enemies</c> — captured
     /// at Stage 1 entry, restored exactly at CleanupReveal. v0.6.0.1
     /// forced this to 1, but the side-effect (bots target each other,
@@ -119,17 +152,19 @@ public sealed class RevealController
             return;
         }
 
-        // Each bot fires 5 "1" lines with INDEPENDENT random delay
-        // 0.2-0.5 sec between consecutive messages. Mixes 8 bots over
-        // ~5-10 second total span depending on rolled delays — no
-        // synchronized burst, looks like jittery real human typing.
-        // Each message goes through SayAsBot which uses UserMessage
-        // SayText2 to broadcast as if the bot itself typed it.
+        // Each bot fires 15 "1" lines with INDEPENDENT random delay
+        // 0.2-0.5 sec between consecutive messages. Per-bot total span
+        // ≈ 3-7.5 sec; across 8 bots staggering naturally → ~120 chat
+        // events spread over 5-8 seconds (overflows Stage 0 into early
+        // Stage 1, which is intentional — the chat-flood masks the
+        // moment of swarm-teleport so it feels like the chaos started
+        // mid-sentence). Each message via UserMessage SayText2 broadcast.
+        const int SpamMessagesPerBot = 15;
         foreach (var fc in _mgr.All)
         {
             var capturedFc = fc;
             int cumulativeTicks = 0;
-            for (int j = 0; j < 5; j++)
+            for (int j = 0; j < SpamMessagesPerBot; j++)
             {
                 int delayTicks = cumulativeTicks;
                 Server.RunOnTick(Server.TickCount + delayTicks,
@@ -211,15 +246,38 @@ public sealed class RevealController
         int humanTeam = humans.Count > 0 ? (int)humans[0].TeamNum : 3;  // default human=CT
         int botTeam = humanTeam == 2 ? 3 : 2;  // opposite
 
-        // Pre-flip teams BEFORE mp_restartgame so respawn at restart uses
-        // the new team's spawn points.
+        // (4) Capture each bot's PRE-REVEAL team for restore at cleanup,
+        //     then SwitchTeam with cap awareness. Available slots on
+        //     target team = TeamCap minus humans already there. Bots
+        //     beyond cap go to spectator (team 1); they re-join their
+        //     pre-reveal team at CleanupReveal.
+        _botPrevTeams.Clear();
+        int humansOnTargetTeam = humans.Count(h => (int)h.TeamNum == botTeam);
+        int availableSlots = Math.Max(0, TeamCap - humansOnTargetTeam);
+        int sentToTarget = 0;
+        int sentToSpec = 0;
         foreach (var fc in _mgr.All) {
             try {
                 var c = Utilities.GetPlayerFromSlot(fc.Slot);
-                if (c != null && c.IsValid)
+                if (c == null || !c.IsValid) continue;
+
+                // Capture original team. Defensive: skip slot=1 (spectator)
+                // captures, bots already in spec wouldn't need a prev-team
+                // and could confuse restore.
+                int prevTeam = (int)c.TeamNum;
+                if (prevTeam >= 2) _botPrevTeams[fc.Slot] = prevTeam;
+
+                if (sentToTarget < availableSlots) {
                     c.SwitchTeam((CsTeam)botTeam);
+                    sentToTarget++;
+                } else {
+                    c.SwitchTeam(CsTeam.Spectator);
+                    sentToSpec++;
+                }
             } catch (Exception ex) { Log.Debug($"SwitchTeam slot={fc.Slot}: {ex.Message}"); }
         }
+        Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {sentToSpec} → spectator " +
+                 $"(cap={TeamCap}, humans on target={humansOnTargetTeam})");
 
         // (4) Clean round restart for fresh respawn state.
         Server.ExecuteCommand("mp_restartgame 1");
@@ -452,6 +510,20 @@ public sealed class RevealController
                 Server.ExecuteCommand($"mp_solid_teammates {(_prevSolidTeammates.Value ? 1 : 0)}");
                 _prevSolidTeammates = null;
             }
+
+            // Restore each bot to its pre-reveal team. Bots that were in
+            // spectator at reveal entry stay there (we didn't capture
+            // them in _botPrevTeams). Bots flipped to spectator due to
+            // team-cap overflow re-join their original team here.
+            foreach (var (slot, prevTeam) in _botPrevTeams) {
+                try {
+                    var c = Utilities.GetPlayerFromSlot(slot);
+                    if (c != null && c.IsValid)
+                        c.SwitchTeam((CsTeam)prevTeam);
+                } catch (Exception ex) { Log.Debug($"Restore team slot={slot}: {ex.Message}"); }
+            }
+            _botPrevTeams.Clear();
+
             foreach (var fc in _mgr.All) RestoreNormalLoadout(fc);
             _combatState.Clear();
         } catch (Exception ex) { Log.Error($"CleanupReveal: {ex.Message}"); }
@@ -504,13 +576,23 @@ public sealed class RevealController
 
     private void TickStage1()
     {
-        // Stage 2 transition condition.
+        // Stage 2 trigger logic (v0.6.0.5 user-spec):
+        //   - HARD MINIMUM Stage1MinDurationSec: nothing fires before this,
+        //     even if all bots are dead. Stage 1 always lasts ≥ 30 sec.
+        //   - After minimum: fire on EITHER 50% bots dead OR 60s timeout.
+        //   - 50% computed against CONFIG fleet size (not current alive
+        //     count), so threshold doesn't shrink as bots die.
         var elapsedTicks = Server.TickCount - _stageStartTick;
         var elapsedSec = elapsedTicks / 64;
+
+        if (elapsedSec < Stage1MinDurationSec) return;  // hard gate
+
         var killThreshold = _mgr.Config.Stage2Kills > 0
             ? _mgr.Config.Stage2Kills
             : Math.Max(1, (_mgr.Config.FleetSize + 1) / 2);
-        if (elapsedSec >= _mgr.Config.Stage2TimeSeconds || _botsKilledThisReveal >= killThreshold)
+        bool killsDone = _botsKilledThisReveal >= killThreshold;
+        bool maxReached = elapsedSec >= Stage1MaxDurationSec;
+        if (killsDone || maxReached)
         {
             EnterStage2();
             return;
