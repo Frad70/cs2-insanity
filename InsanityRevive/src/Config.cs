@@ -54,10 +54,23 @@ public sealed class Config
 
     /// <summary>
     /// FleetManager target — number of fake-clients held resident on the
-    /// server. Default 8, clamped 4..16. Edit insanity.cfg + reload plugin
-    /// for hot change. (v0.6.0+)
+    /// server. Default 8, clamped 0..16. Edit insanity.cfg + reload plugin
+    /// for persistent change, or `insanity_fleet_size N` for runtime override.
+    /// 0 = empty fleet (kick everyone, hold empty). (v0.6.0+; runtime
+    /// override + zero-allowed in v0.6.0.7-beta.)
     /// </summary>
-    public int    FleetSize        => Math.Clamp(GetInt("insanity_fleet_size", 8), 4, 16);
+    public int    FleetSize        => Math.Clamp(_fleetSizeOverride ?? GetInt("insanity_fleet_size", 8), 0, 16);
+
+    private int? _fleetSizeOverride;
+    public int? FleetSizeOverride => _fleetSizeOverride;
+    public bool HasFleetSizeOverride => _fleetSizeOverride.HasValue;
+    /// <summary>
+    /// Runtime override for FleetSize. Pass null to clear and fall back to
+    /// cfg-file value. Clamped 0..16 inside FleetSize getter. Used by
+    /// `insanity_fleet_size` and `insanity_kick_bots` (which sets to 0 to
+    /// keep the fleet drained until the user restores it).
+    /// </summary>
+    public void SetFleetSizeOverride(int? n) => _fleetSizeOverride = n;
 
     /// <summary>
     /// Reveal Stage 2 trigger thresholds. Stage 2 fires when

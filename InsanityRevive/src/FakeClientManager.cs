@@ -462,6 +462,23 @@ public sealed class FakeClientManager : IDisposable
     {
         var n = _byId.Count;
         foreach (var id in _byId.Keys.ToArray()) Despawn(id, reason);
+        // Drop in-flight pending personas too — without this, names that
+        // were pushed to the C++ FIFO but not yet adopted will land as
+        // fresh _byId entries on the next CFC PRE / OCC dance and the
+        // fleet appears to "respawn" right after a kick. The pool FIFO
+        // itself is C++-consumed (SPSC contract — CSSharp must not write
+        // its tail), so we leave that pipeline alone; those orphan FIFO
+        // names will be popped + adopted, but with _pendingPersonaIds
+        // empty they take the engine_quota path and become regular
+        // pickups. Combined with FleetSize=0 (set by insanity_kick_bots)
+        // they're shrunk on the next Reconcile.
+        if (_pendingPersonaIds.Count > 0)
+        {
+            Telemetry.Write("pending_clear", new Dictionary<string, object?> {
+                { "reason", reason }, { "count", _pendingPersonaIds.Count } });
+            _pendingPersonaIds.Clear();
+        }
+        EnforceBotQuota();
         return n;
     }
 
