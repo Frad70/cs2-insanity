@@ -20,8 +20,10 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
-#include <errno.h>
 #include <dlfcn.h>
+
+#include <set>
+#include <string>
 
 #include <iserver.h>
 #include <eiface.h>
@@ -55,6 +57,26 @@ SH_DECL_HOOK6_void(IServerGameClients, OnClientConnected, SH_NOATTRIB, 0,
                    CPlayerSlot, const char*, uint64, const char*, const char*, bool);
 SH_DECL_HOOK4_void(IServerGameClients, ClientPutInServer, SH_NOATTRIB, 0,
                    CPlayerSlot, char const*, int, uint64);
+SH_DECL_HOOK1(IVEngineServer, CreateFakeClient, SH_NOATTRIB, 0, CPlayerSlot, const char*);
+
+// In-flight set of personas we issued via CFC PRE override but haven't yet
+// seen at OCC. OCC handler matches incoming pszName here to decide whether
+// the slot is one of ours and should be marked + byte-flipped. Same engine
+// thread for both hooks — no synchronization needed.
+static std::set<std::string> g_ExpectedNames;
+
+// Fallback persona pool for engine-spawned bots (engine_quota / mp_warmup /
+// manual rcon bot_add) whose CSSharp hadn't pushed a name to the FIFO.
+// Cycles through deterministically.
+static const char* k_FallbackRoster[] = {
+    "kennyS",  "Magisk",  "ZywOo",   "s1mple",  "NiKo",     "device",
+    "electronic","blameF","frozen",  "huNter",  "rain",     "Twistzz",
+    "ropz",    "Brollan", "Aleksib", "broky",   "FaNg",     "donk",
+    "sh1ro",   "jks",     "Boombl4", "Ax1Le",   "Hobbit",   "n0rb3r7",
+    "Spinx",   "torzsi",  "stavn",   "TeSeS",   "kyxsan",   "snappi",
+    "k1to",    "sjuush",
+};
+static int g_FallbackIdx = 0;
 
 InsanityHiderPlugin g_Plugin;
 PLUGIN_EXPOSE(InsanityHiderPlugin, g_Plugin);
@@ -104,7 +126,23 @@ void InsanityHiderPlugin::Hook_OnClientConnected_Post(CPlayerSlot slot, const ch
     if (!m_Pool.IsActive())                                   RETURN_META(MRES_IGNORED);
     if (!bFakePlayer)                                         RETURN_META(MRES_IGNORED);
     if (idx < 0 || idx >= (int)InsanityHider::POOL_SLOTS)     RETURN_META(MRES_IGNORED);
-    if (!m_Pool.IsManaged(idx))                               RETURN_META(MRES_IGNORED);
+
+    // Match incoming pszName against our expected_set populated by CFC PRE.
+    // If hit, this slot is ours: mark managed + write pool name + flip byte.
+    bool managed = false;
+    if (pszName && pszName[0]) {
+        auto it = g_ExpectedNames.find(pszName);
+        if (it != g_ExpectedNames.end()) {
+            managed = true;
+            m_Pool.WriteManaged(idx, 1);
+            m_Pool.WriteName(idx, pszName);
+            g_ExpectedNames.erase(it);
+        } else if (m_Pool.IsManaged(idx)) {
+            // Fallback: pool was already marked (e.g. mapchange survival).
+            managed = true;
+        }
+    }
+    if (!managed) RETURN_META(MRES_IGNORED);
 
     auto* pClient = ResolveClientBySlot(idx);
     if (!pClient) {
@@ -116,45 +154,67 @@ void InsanityHiderPlugin::Hook_OnClientConnected_Post(CPlayerSlot slot, const ch
     if (raw[kFakePlayerOffset] != 0x01) RETURN_META(MRES_IGNORED);  // idempotent
     raw[kFakePlayerOffset] = 0;
 
-    // Overwrite m_Name from pool persona, if CSSharp wrote one.
-    const char* persona = m_Pool.GetName(idx);
-    const char* readback = persona ? OverwriteEngineName(this, pClient, persona) : nullptr;
+    // m_Name already carries persona (engine got it via CFC override), but
+    // call Set anyway to keep CUtlString::m_pString consistent with what we
+    // expect (CSSharp side reads it back).
+    OverwriteEngineName(this, pClient, pszName);
 
-    META_CONPRINTF("[InsanityHider] wrote 0x00 slot=%d engineName=%s persona=%s readback=%s\n",
-                   idx, pszName ? pszName : "?", persona ? persona : "<none>",
-                   readback ? readback : "<n/a>");
+    META_CONPRINTF("[InsanityHider] mark+flip slot=%d persona='%s'\n", idx, pszName);
     RETURN_META(MRES_IGNORED);
 }
 
+// CPiS post-hook is now a redundant safety net. CFC PRE override + OCC mark
+// already handle byte-flip and name overwrite for the normal path. CPiS is
+// useful only for slots that survived a mapchange (pool already managed,
+// engine recreated CServerSideClient, byte 160 reset to 0x01).
 void InsanityHiderPlugin::Hook_ClientPutInServer_Post(CPlayerSlot slot, char const* pszName,
                                                       int type, uint64) {
     if (m_bSelfDisabled) RETURN_META(MRES_IGNORED);
     if (!m_Pool.IsActive()) RETURN_META(MRES_IGNORED);
-    if (type != 1) RETURN_META(MRES_IGNORED);  // not a fake-client
+    if (type != 1) RETURN_META(MRES_IGNORED);
     int idx = slot.Get();
     if (idx < 0 || idx >= (int)InsanityHider::POOL_SLOTS) RETURN_META(MRES_IGNORED);
-    if (!m_Pool.IsManaged(idx)) RETURN_META(MRES_IGNORED);  // CSSharp didn't mark it
+    if (!m_Pool.IsManaged(idx)) RETURN_META(MRES_IGNORED);
 
     auto* pClient = ResolveClientBySlot(idx);
     if (!pClient) RETURN_META(MRES_IGNORED);
     auto* raw = reinterpret_cast<unsigned char*>(pClient);
 
-    bool wroteByte = (raw[kFakePlayerOffset] == 0x01);
-    if (wroteByte) raw[kFakePlayerOffset] = 0;
-
-    // Overwrite m_Name from pool persona for managed slot. Re-applied here
-    // (in addition to OCC path) because the engine re-stamps bot names
-    // from bot_names.txt during post-spawn — CPiS is later in the chain
-    // and outlasts that stamp.
+    if (raw[kFakePlayerOffset] != 0x01) RETURN_META(MRES_IGNORED);  // already flipped
+    raw[kFakePlayerOffset] = 0;
     const char* persona = m_Pool.GetName(idx);
-    const char* readback = persona ? OverwriteEngineName(this, pClient, persona) : nullptr;
-
-    if (wroteByte || persona) {
-        META_CONPRINTF("[InsanityHider] late-adopt slot=%d engineName=%s persona=%s readback=%s (CPiS)\n",
-                       idx, pszName ? pszName : "?", persona ? persona : "<none>",
-                       readback ? readback : "<n/a>");
-    }
+    if (persona) OverwriteEngineName(this, pClient, persona);
+    META_CONPRINTF("[InsanityHider] CPiS safety-net slot=%d persona='%s'\n",
+                   idx, persona ? persona : pszName);
     RETURN_META(MRES_IGNORED);
+}
+
+// PRE-hook on engine->CreateFakeClient. Engine has just decided to allocate
+// a fake-client and proposes a netname (from bot_names.txt). We override it
+// with our persona BEFORE engine continues, so userinfo broadcast carries
+// our name natively. SET_META_RESULT_NEWPARAMS recalls the function chain
+// with the new arg, then we return MRES_SUPERCEDE inside the macro.
+CPlayerSlot InsanityHiderPlugin::Hook_CreateFakeClient_Pre(const char* netname) {
+    if (m_bSelfDisabled || !m_Pool.IsActive()) {
+        RETURN_META_VALUE(MRES_IGNORED, CPlayerSlot(-1));
+    }
+
+    // (1) Try CSSharp FIFO first (matches insanity_spawn_bots batches).
+    char fifoBuf[InsanityHider::POOL_NAME_BYTES];
+    const char* persona = nullptr;
+    if (m_Pool.PopFifo(fifoBuf, sizeof(fifoBuf)) && fifoBuf[0]) {
+        persona = fifoBuf;
+    } else {
+        // (2) Fallback roster (engine_quota / autoteambalance / manual rcon).
+        persona = k_FallbackRoster[g_FallbackIdx++ %
+            (sizeof(k_FallbackRoster) / sizeof(*k_FallbackRoster))];
+    }
+
+    g_ExpectedNames.insert(persona);
+    META_CONPRINTF("[InsanityHider] CFC PRE override '%s' -> '%s'\n",
+                   netname ? netname : "<null>", persona);
+    RETURN_META_VALUE_NEWPARAMS(MRES_HANDLED, CPlayerSlot(-1),
+                                &IVEngineServer::CreateFakeClient, (persona));
 }
 
 void InsanityHiderPlugin::OnLevelInit(char const* pMapName, char const*, char const*,
@@ -207,6 +267,8 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
     SH_ADD_HOOK(IServerGameClients, ClientPutInServer, gameclients,
                 SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
+    SH_ADD_HOOK(IVEngineServer, CreateFakeClient, engine,
+                SH_MEMBER(this, &InsanityHiderPlugin::Hook_CreateFakeClient_Pre), false /* PRE */);
 
     META_CONPRINTF("[InsanityHider] loaded — m_bFakePlayer offset=%d, kill-switch via pool[%zu]\n",
                    kFakePlayerOffset, InsanityHider::POOL_ACTIVE_OFFSET);
@@ -218,6 +280,8 @@ bool InsanityHiderPlugin::Unload(char* error, size_t maxlen) {
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
     SH_REMOVE_HOOK(IServerGameClients, ClientPutInServer, gameclients,
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_ClientPutInServer_Post), true);
+    SH_REMOVE_HOOK(IVEngineServer, CreateFakeClient, engine,
+                   SH_MEMBER(this, &InsanityHiderPlugin::Hook_CreateFakeClient_Pre), false);
     m_Pool.Close();
     if (m_pTier0) { dlclose(m_pTier0); m_pTier0 = nullptr; m_pUtlStringSet = nullptr; }
     return true;

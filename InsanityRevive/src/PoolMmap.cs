@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Text;
+using System.Threading;
 
 namespace InsanityRevive;
 
@@ -21,14 +22,18 @@ namespace InsanityRevive;
 public sealed class PoolMmap : IDisposable
 {
     public const uint Magic         = 0x46534E49u;
-    public const uint Version       = 2u;
+    public const uint Version       = 3u;
     public const int  Slots         = 120;
     public const int  HeaderBytes   = 12;
     public const int  ActiveOffset  = 8;
     public const int  ManagedOffset = HeaderBytes;
     public const int  NamesOffset   = ManagedOffset + Slots;   // 132
     public const int  NameBytes     = 32;
-    public const int  Total         = NamesOffset + (Slots * NameBytes);
+    public const int  FifoCapacity  = 16;
+    public const int  FifoOffset    = NamesOffset + (Slots * NameBytes);   // 3972
+    public const int  FifoHeadOffset = FifoOffset + (FifoCapacity * NameBytes);  // 4484
+    public const int  FifoTailOffset = FifoHeadOffset + 4;                      // 4488
+    public const int  Total         = FifoTailOffset + 4;                       // 4492
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _va;
@@ -55,21 +60,23 @@ public sealed class PoolMmap : IDisposable
             uint version = _va.ReadUInt32(4);
             if (magic != Magic || version != Version)
             {
-                // Stale or older-version pool — full reinit. v1 had no names
-                // segment; v2 needs it. Don't try to migrate — just zero.
+                // Stale or older-version pool — full reinit. Don't try to
+                // migrate — restart-time state is ephemeral.
                 Log.Warn($"PoolMmap reinit (magic=0x{magic:X8} ver={version} → v{Version})");
                 _va.Write(0, Magic);
                 _va.Write(4, Version);
                 _va.Write(ActiveOffset, 1u);
                 ZeroManaged();
                 ZeroNames();
+                ZeroFifo();
             }
             else
             {
-                // Valid v2 pool — fresh boot still wants clean slate.
+                // Valid v3 pool — fresh boot still wants clean slate.
                 _va.Write(ActiveOffset, 1u);
                 ZeroManaged();
                 ZeroNames();
+                ZeroFifo();
             }
             Log.Info($"PoolMmap opened: {path} (v{Version}, {Slots} slots, active=1)");
             return true;
@@ -92,6 +99,14 @@ public sealed class PoolMmap : IDisposable
     {
         if (_va == null) return;
         for (int i = 0; i < Slots * NameBytes; i++) _va.Write(NamesOffset + i, (byte)0);
+    }
+
+    private void ZeroFifo()
+    {
+        if (_va == null) return;
+        for (int i = 0; i < FifoCapacity * NameBytes; i++) _va.Write(FifoOffset + i, (byte)0);
+        _va.Write(FifoHeadOffset, 0u);
+        _va.Write(FifoTailOffset, 0u);
     }
 
     public void Write(int slot, byte val)
@@ -148,6 +163,29 @@ public sealed class PoolMmap : IDisposable
         int len = 0;
         while (len < NameBytes && bytes[len] != 0) len++;
         return Encoding.UTF8.GetString(bytes, 0, len);
+    }
+
+    // Push a persona name into the SPSC FIFO. C++ Hider pops from the other
+    // side at CFC PRE. Returns false if the queue is full (caller should
+    // either drop the spawn or just retry; queue capacity is 16, well above
+    // any realistic batched insanity_spawn_bots N).
+    public bool PushFifo(string name)
+    {
+        if (_va == null || string.IsNullOrEmpty(name)) return false;
+        uint head = _va.ReadUInt32(FifoHeadOffset);
+        uint tail = _va.ReadUInt32(FifoTailOffset);
+        if (head - tail >= (uint)FifoCapacity) return false;  // full
+        int slotIdx = (int)(head % (uint)FifoCapacity);
+        var bytes = new byte[NameBytes];
+        var src = Encoding.UTF8.GetBytes(name);
+        int n = Math.Min(src.Length, NameBytes - 1);
+        Array.Copy(src, bytes, n);
+        int slotOff = FifoOffset + slotIdx * NameBytes;
+        for (int i = 0; i < NameBytes; i++) _va.Write(slotOff + i, bytes[i]);
+        // Release-store head AFTER body write so C++ side sees populated slot.
+        Thread.MemoryBarrier();
+        _va.Write(FifoHeadOffset, head + 1);
+        return true;
     }
 
     public void Close()
