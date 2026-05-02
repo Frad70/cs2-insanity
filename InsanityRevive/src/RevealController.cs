@@ -293,10 +293,17 @@ public sealed class RevealController
 
     /// <summary>
     /// Move all bots to <paramref name="botTeam"/> until cap is reached,
-    /// rest to spectator. Belt-and-suspenders: SwitchTeam (proper engine
-    /// integration) THEN verify via TeamNum read. If verify fails (engine
-    /// rejected the switch), fall back to direct schema write of m_iTeamNum.
-    /// Records sentToTarget / sentToSpec / failedFlips counts.
+    /// rest to spectator.
+    ///
+    /// HISTORY: v0.6.0.6 attempted a Schema.SetSchemaValue&lt;byte&gt; +
+    /// SetStateChanged fallback for m_iTeamNum when SwitchTeam appeared to
+    /// fail verification. CSSharp warned "Field CCSPlayerController:
+    /// m_iTeamNum is not networked, but SetStateChanged was called on it"
+    /// and the server CRASHED on the next tick (dump 21:45:24). m_iTeamNum
+    /// IS server-state but writing it via the schema bypass path corrupts
+    /// engine team-counter accounting. Reverted to plain SwitchTeam +
+    /// log-only verification for diagnostics. If a switch fails, accept
+    /// it — better an unflipped bot than a crashed server.
     /// </summary>
     private void FlipTeamsWithCap(int botTeam)
     {
@@ -305,7 +312,7 @@ public sealed class RevealController
         int availableSlots = Math.Max(0, TeamCap - humansOnTargetTeam);
         int sentToTarget = 0;
         int sentToSpec = 0;
-        int verifyFailed = 0;
+        int verifyMismatch = 0;
         foreach (var fc in _mgr.All) {
             try {
                 var c = Utilities.GetPlayerFromSlot(fc.Slot);
@@ -314,26 +321,18 @@ public sealed class RevealController
                 int target = sentToTarget < availableSlots ? botTeam : (int)CsTeam.Spectator;
                 c.SwitchTeam((CsTeam)target);
 
-                // Verify the switch took. SwitchTeam in CSSharp 1.0.367 is
-                // queue-based; rapid-fire calls in same tick may drop some.
-                if ((int)c.TeamNum != target) {
-                    // Schema fallback — write m_iTeamNum directly.
-                    try {
-                        Schema.SetSchemaValue<byte>(c.Handle,
-                            "CCSPlayerController", "m_iTeamNum", (byte)target);
-                        Utilities.SetStateChanged(c, "CCSPlayerController", "m_iTeamNum");
-                    } catch (Exception ex) {
-                        Log.Debug($"FlipTeams schema fallback slot={fc.Slot}: {ex.Message}");
-                        verifyFailed++;
-                    }
-                }
+                // Verify is LOG-ONLY now — no fallback write. If SwitchTeam
+                // is queue-based and didn't apply yet, c.TeamNum may not
+                // reflect the new value for a tick. We don't try to force.
+                if ((int)c.TeamNum != target) verifyMismatch++;
 
                 if (target == botTeam) sentToTarget++;
                 else sentToSpec++;
             } catch (Exception ex) { Log.Debug($"FlipTeams slot={fc.Slot}: {ex.Message}"); }
         }
         Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {sentToSpec} → spectator, " +
-                 $"{verifyFailed} verify-fail (cap={TeamCap}, humans on target={humansOnTargetTeam})");
+                 $"{verifyMismatch} immediate-verify-mismatch (may resolve next tick) " +
+                 $"(cap={TeamCap}, humans on target={humansOnTargetTeam})");
     }
 
     /// <summary>

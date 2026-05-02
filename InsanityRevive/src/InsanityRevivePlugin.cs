@@ -63,6 +63,24 @@ public sealed class InsanityRevivePlugin : BasePlugin
         Log.Info($"loaded — telemetry={_telemetry.Path} session={_telemetry.SessionId} " +
                  $"detour={_manager.DetourInstalled} steamIdMode={_manager.SteamIds.Mode}");
 
+        // Vanilla `bot_kick` (no args) kicks every bot, but engine state
+        // doesn't tell FleetManager — Reconcile() repopulates within ~1s.
+        // Intercept the bare form, drain the fleet through the plugin,
+        // and pin FleetSize=0 so Reconcile holds the empty state until
+        // the user restores it via `insanity_fleet_size N`. Targeted
+        // form (`bot_kick <name>`) is left alone — that's how we kick
+        // individual bots ourselves and how admins surgically drop one.
+        AddCommandListener("bot_kick", (caller, info) => {
+            if (_manager == null) return HookResult.Continue;
+            if (info.ArgCount > 1) return HookResult.Continue; // targeted, leave alone
+            try {
+                var n = _manager.DespawnAll("vanilla_bot_kick");
+                _manager.Config.SetFleetSizeOverride(0);
+                Log.Info($"vanilla bot_kick intercepted: drained {n}, fleet pinned to 0 — `insanity_fleet_size N` to restore");
+            } catch (Exception ex) { Log.Error($"bot_kick listener: {ex.Message}"); }
+            return HookResult.Continue;
+        }, HookMode.Pre);
+
         // Hot reload: OnClientPutInServer will not fire for bots that
         // are already on the server, so adopt them now in one pass.
         if (hotReload) {
@@ -98,13 +116,57 @@ public sealed class InsanityRevivePlugin : BasePlugin
         info.ReplyToCommand($"[Insanity] queued {n} bot_add commands; see scoreboard in ~1s");
     }
 
-    [ConsoleCommand("insanity_kick_bots", "Kick all fake bots managed by this plugin")]
+    [ConsoleCommand("insanity_kick_bots", "Kick all fake bots; pins FleetSize=0 unless 'respawn' arg given")]
     [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 0, usage: "[respawn]")]
     public void OnKickBots(CCSPlayerController? caller, CommandInfo info)
     {
         if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
-        var n = _manager.DespawnAll("admin_kick");
-        info.ReplyToCommand($"[Insanity] kicked {n} fake bots");
+        bool respawn = info.ArgCount > 1
+            && info.GetArg(1).Trim().Equals("respawn", StringComparison.OrdinalIgnoreCase);
+        var n = _manager.DespawnAll(respawn ? "admin_kick_respawn" : "admin_kick_drain");
+        if (!respawn)
+        {
+            // Pin to 0 so FleetManager.Reconcile holds the empty state.
+            // Without this the fleet repopulates within 1 second.
+            _manager.Config.SetFleetSizeOverride(0);
+            info.ReplyToCommand($"[Insanity] kicked {n} fake bots; fleet drained — use `insanity_fleet_size N` to restore");
+        }
+        else
+        {
+            info.ReplyToCommand($"[Insanity] kicked {n} fake bots; fleet will respawn (size={_manager.Config.FleetSize})");
+        }
+    }
+
+    [ConsoleCommand("insanity_fleet_size", "Set FleetSize override at runtime (0..16); 'default' clears override")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 0, usage: "<0..16|default>")]
+    public void OnFleetSize(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        if (info.ArgCount < 2)
+        {
+            var ovr = _manager.Config.HasFleetSizeOverride
+                ? _manager.Config.FleetSizeOverride!.Value.ToString()
+                : "(none — using cfg)";
+            info.ReplyToCommand($"[Insanity] fleet size={_manager.Config.FleetSize} override={ovr} active={_manager.All.Count} pending={_manager.PendingPersonaCount}");
+            return;
+        }
+        var arg = info.GetArg(1).Trim();
+        if (arg.Equals("default", StringComparison.OrdinalIgnoreCase) || arg == "-1")
+        {
+            _manager.Config.SetFleetSizeOverride(null);
+            info.ReplyToCommand($"[Insanity] fleet size override cleared — using cfg ({_manager.Config.FleetSize})");
+            return;
+        }
+        if (!int.TryParse(arg, out var n))
+        {
+            info.ReplyToCommand($"[Insanity] usage: insanity_fleet_size <0..16|default>");
+            return;
+        }
+        var clamped = Math.Clamp(n, 0, 16);
+        _manager.Config.SetFleetSizeOverride(clamped);
+        info.ReplyToCommand($"[Insanity] fleet size override = {clamped} (was active={_manager.All.Count} pending={_manager.PendingPersonaCount})");
     }
 
     [ConsoleCommand("insanity_status", "Print fake-client manager status")]
@@ -112,7 +174,12 @@ public sealed class InsanityRevivePlugin : BasePlugin
     public void OnStatus(CCSPlayerController? caller, CommandInfo info)
     {
         if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
-        info.ReplyToCommand($"[Insanity] bots={_manager.All.Count} detour={_manager.DetourInstalled} " +
+        var ovrLabel = _manager.Config.HasFleetSizeOverride
+            ? $" (override={_manager.Config.FleetSizeOverride})"
+            : "";
+        info.ReplyToCommand($"[Insanity] bots={_manager.All.Count} pending={_manager.PendingPersonaCount} " +
+                            $"target={_manager.Config.FleetSize}{ovrLabel} " +
+                            $"detour={_manager.DetourInstalled} " +
                             $"steamIdMode={_manager.SteamIds.Mode} telemetry={_telemetry?.Path}");
         foreach (var fc in _manager.All.Take(16))
         {
