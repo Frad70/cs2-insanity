@@ -118,6 +118,7 @@ public sealed class FakeClientManager : IDisposable
     public int PendingPersonaCount => _pendingPersonaIds.Count;
     public bool IsMapchangeInProgress => _pool.IsMapchangeInProgress();
     public FleetManager Fleet { get; private set; } = null!;
+    public RevealController Reveal { get; private set; } = null!;
 
     public FakeClientManager(Config cfg, Telemetry telemetry)
     {
@@ -127,7 +128,12 @@ public sealed class FakeClientManager : IDisposable
         Detour = new ProcessUsercmdsDetour();
         _registry = new PersonaRegistry();
         Fleet = new FleetManager(this);
+        Reveal = new RevealController(this);
     }
+
+    /// <summary>FakeClient lookup by slot — used by RevealController.</summary>
+    public FakeClient? FindBySlot(int slot)
+        => _byId.Values.FirstOrDefault(b => b.Slot == slot);
 
     public void OnLoad(string csVersion)
     {
@@ -539,6 +545,7 @@ public sealed class FakeClientManager : IDisposable
     {
         _tick++; _ticksSinceSummary++;
         Fleet.OnTick();
+        Reveal.OnTick();
         foreach (var fc in _byId.Values)
         {
             CCSPlayerController? c = null;
