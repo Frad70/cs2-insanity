@@ -118,13 +118,15 @@ public sealed class RevealController
             return;
         }
 
-        // Pick a random bot to spam "1" five times across 5 seconds.
-        var spammer = bots[_rng.Next(bots.Count)];
+        // ALL bots spam "1" at t=0,1,2,3,4 sec — bursts of fleet_size
+        // chat lines per second. Flood-the-chat effect amplifies the
+        // "something is wrong" feel of Stage 0.
         for (int i = 0; i < 5; i++)
         {
             int delaySec = i;
-            Server.RunOnTick(Server.TickCount + delaySec * 64,
-                () => SayAsBot(spammer, "1"));
+            Server.RunOnTick(Server.TickCount + delaySec * 64, () => {
+                foreach (var fc in _mgr.All) SayAsBot(fc, "1");
+            });
         }
 
         // Sync jump impulse DROPPED in v0.6.0-beta. m_vecAbsVelocity is
@@ -220,10 +222,50 @@ public sealed class RevealController
         });
     }
 
+    /// <summary>
+    /// Distance (Hammer Units) from human centroid where the bot
+    /// cluster materializes. 300 HU ≈ 5m world space → ~1.5 sec for a
+    /// speed-boosted (×1.4) bot to close the gap with knife rush.
+    /// Gives the human reaction window (turn, see swarm coming, run /
+    /// shoot back) before the slaughter starts. Tuned per friend
+    /// playtest 2026-05-02; if too easy, drop to 200 HU; too hard,
+    /// raise to 500 HU.
+    /// </summary>
+    private const float SwarmOffsetDistance = 300f;
+
     private void DeploySwarmAndKnifeRush()
     {
         var humansNow = LivingHumanControllers();
         Vector? centroid = humansNow.Count > 0 ? ComputeCentroid(humansNow) : null;
+
+        // Pick a single 2D direction biased toward the human's current
+        // FACING — random within ±90° of where the human is looking. Z
+        // stays at human's centroid Z. Rationale: human's view direction
+        // is statistically "open space" (you don't usually stare at a
+        // wall 1ft from your face), so clustering somewhere in the half-
+        // circle in front of them lands in playable terrain. Spawn-in-
+        // wall avoidance without a working TraceRay wrapper in CSSharp
+        // 1.0.367. Behind-the-back ambush sacrificed for survivability.
+        Vector? clusterOrigin = null;
+        if (centroid != null) {
+            // Reference yaw: first human's view direction.
+            float yawDeg = 0f;
+            try {
+                var refPawn = humansNow[0].PlayerPawn?.Value;
+                if (refPawn != null && refPawn.IsValid)
+                    yawDeg = refPawn.EyeAngles.Y;
+            } catch { /* fall through with yawDeg = 0 */ }
+
+            // Random offset in [-π/2, +π/2] from forward.
+            double yawRad = yawDeg * Math.PI / 180.0;
+            double offsetRad = (_rng.NextDouble() - 0.5) * Math.PI;
+            double finalRad = yawRad + offsetRad;
+
+            clusterOrigin = new Vector(
+                centroid.X + (float)(Math.Cos(finalRad) * SwarmOffsetDistance),
+                centroid.Y + (float)(Math.Sin(finalRad) * SwarmOffsetDistance),
+                centroid.Z);
+        }
 
         var bots = _mgr.All.ToList();
         for (int i = 0; i < bots.Count; i++) {
@@ -235,14 +277,17 @@ public sealed class RevealController
                 if (pawn == null || !pawn.IsValid) continue;
                 if (pawn.LifeState != 0) continue;  // dead bot — skip swarm-tp
 
-                // Teleport with small stagger so bots are clustered, not
-                // stacked at a single point. mp_solid_teammates=0 allows
-                // overlap, but visual variation looks better. Stagger
-                // pattern: 4-wide rows, ±1.5 unit spread.
-                if (centroid != null) {
+                // Per-bot stagger inside cluster: 4-wide rows, ±1.5 unit
+                // spread. With mp_solid_teammates=0 they can occupy the
+                // same point, but visual variation reads as "8 bots", not
+                // "one bot quintuple-stacked".
+                if (clusterOrigin != null) {
                     float dx = (i % 4) - 1.5f;
                     float dy = (i / 4) - 1.0f;
-                    var pos = new Vector(centroid.X + dx, centroid.Y + dy, centroid.Z);
+                    var pos = new Vector(
+                        clusterOrigin.X + dx,
+                        clusterOrigin.Y + dy,
+                        clusterOrigin.Z);
                     pawn.Teleport(pos, pawn.AbsRotation, new Vector(0, 0, 0));
                 }
 
