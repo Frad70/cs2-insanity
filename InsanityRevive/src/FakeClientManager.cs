@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 
@@ -50,11 +51,66 @@ public sealed class FakeClientManager : IDisposable
     // Counter for source="command" vs "engine_quota" tagging. Spawn()
     // bumps it; AdoptController consumes one. Refused bot_adds may leak
     // a count → next engine bot is mis-tagged. Accepted as race-free.
+    //
+    // NOTE post-v0.5.2-beta: with InsanityHider's CFC PRE empty-FIFO
+    // SUPERCEDE, "engine_quota" should be effectively unreachable —
+    // every CreateFakeClient that lacks a CSSharp Spawn() is blocked at
+    // the C++ layer. Counter retained for race-window diagnostics.
     private int _commandSpawnsPending;
     private int _nextId = 1;
     private int _tick;
     private int _ticksSinceSummary;
     private bool _navPatched;
+
+    // Slot → normalized name of currently connected human players.
+    // Maintained at OnClientPutInServer (humans only) and torn down at
+    // OnClientDisconnect. AcquireForSpawn unions Values with the
+    // active-persona name set when minting/picking a persona, so a bot
+    // never gets the same display name as a live human.
+    //
+    // Slot-keyed (not just a HashSet) because human names can change
+    // mid-session via Steam (rare); on disconnect we look up by slot
+    // to remove the right entry without ambiguity.
+    //
+    // KNOWN RACE (P/03 step 5+ TODO): if a human connects between our
+    // PopFifo failure (engine FIFO empty) and CSSharp's listener firing,
+    // a bot Spawn() may have already minted with the conflicting name.
+    // Mitigations available but deferred:
+    //   (a) re-check in CFC PRE (C++ side) against CServerSideClient[]
+    //       names before issuing the override
+    //   (b) accept rare collision; it self-resolves on next mapchange
+    //       (registry refreshes via AcquireForSpawn at respawn)
+    // Low impact in practice: humans don't connect mid-batch-spawn.
+    private readonly Dictionary<int, string> _humanNamesBySlot = new();
+
+    /// <summary>
+    /// Compare key for name collision detection. NFKC + lowercase + trim.
+    /// Display name preserves original case; only the lookup key is
+    /// normalized. Cyrillic→latin transliteration NOT applied — deferred
+    /// to P/03 step 5 when ru+en corpus comes online.
+    /// </summary>
+    public static string Normalize(string s) =>
+        string.IsNullOrEmpty(s) ? string.Empty
+            : s.Normalize(NormalizationForm.FormKC).Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// Re-assert engine `bot_quota` to match (active + pending) bot count.
+    /// Without this, engine sees default `bot_quota=10` (or anything > our
+    /// actual count) and hammers CreateFakeClient at ~64 attempts/sec/slot
+    /// missing — InsanityHider supercedes them all (correctness preserved),
+    /// but the retry loop wastes CPU and floods server.log with "Unable to
+    /// create bot" lines. Setting quota = actual_count satisfies the
+    /// engine's appetite and quiets the loop.
+    ///
+    /// Called after Spawn / Despawn / OnMapStart respawn batch / once per
+    /// second from Tick (defensive — engine resets quota at warmup_end and
+    /// possibly other phase transitions). Idempotent.
+    /// </summary>
+    private void EnforceBotQuota()
+    {
+        int target = _byId.Count + _pendingPersonaIds.Count;
+        Server.ExecuteCommand($"bot_quota {target}");
+    }
 
     public IReadOnlyCollection<FakeClient> All => _byId.Values;
 
@@ -134,15 +190,23 @@ public sealed class FakeClientManager : IDisposable
         }
         else
         {
-            // Reserve names that are currently active OR in-flight as pending
-            // so the same name isn't issued twice in a batch.
+            // Reserve names that:
+            //   - currently active personas (already on a slot)
+            //   - in-flight as pending (Spawn issued, not yet adopted)
+            //   - currently connected humans (collision-free vs live players)
+            // All keys NORMALIZED via Normalize() — case-insensitive + NFKC
+            // unicode-fold so 'ZyWoO' == 'zywoo' == 'ZYWOO'. Display name
+            // preserves original case in the registry; only the lookup key
+            // is normalized.
             var reserved = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var p in _registry.Active) reserved.Add(p.Name);
+            foreach (var p in _registry.Active) reserved.Add(Normalize(p.Name));
             foreach (var pid in _pendingPersonaIds)
             {
                 var p2 = _registry.GetById(pid);
-                if (p2 != null) reserved.Add(p2.Name);
+                if (p2 != null) reserved.Add(Normalize(p2.Name));
             }
+            foreach (var humanName in _humanNamesBySlot.Values)
+                reserved.Add(humanName);  // already normalized
             persona = _registry.AcquireForSpawn(NamePool, reserved);
         }
 
@@ -157,6 +221,13 @@ public sealed class FakeClientManager : IDisposable
         Telemetry.Write("spawn_request", new Dictionary<string, object?> {
             { "personaId", persona.Id }, { "name", persona.Name },
             { "team", team.ToString() }, { "explicit", personaId.HasValue } });
+
+        // v0.5.2-beta: cap engine quota at our actual+pending count so it
+        // doesn't try to auto-fill above what we've explicitly issued.
+        // Without this, engine sees default-or-bumped bot_quota and fires
+        // CreateFakeClient ~64Hz per missing slot — InsanityHider supercedes
+        // them all (correctness preserved), but the retry loop wastes CPU.
+        EnforceBotQuota();
     }
 
     public void SetHiderActive(bool active)
@@ -184,7 +255,15 @@ public sealed class FakeClientManager : IDisposable
             // after our byte-160 flip. Bots never have one. Defends against
             // orphaned pool[slot]=1 marks from previous bots whose Despawn
             // didn't fire.
-            if (c.AuthorizedSteamID != null) return;
+            if (c.AuthorizedSteamID != null) {
+                // Track human name for AcquireForSpawn collision-avoidance.
+                // Stored normalized (NFKC + lowercase) so 'kennyS' (human)
+                // blocks bot mint of 'kennys' or 'KennyS' alike.
+                var key = Normalize(c.PlayerName ?? "");
+                if (!string.IsNullOrEmpty(key))
+                    _humanNamesBySlot[slot] = key;
+                return;
+            }
 
             // Pool flag is the source of truth. By CPiS time, C++ Hider's
             // CPiS post-hook has already flipped byte 160 for managed slots
@@ -199,6 +278,12 @@ public sealed class FakeClientManager : IDisposable
     public void OnClientDisconnect(int slot)
     {
         try {
+            // Drop human-name tracking unconditionally — humans should be
+            // forgotten across mapchange (their PutInServer fires fresh
+            // on the new map). Bot-managed slots aren't in this map, so
+            // a Remove() that misses is a no-op.
+            _humanNamesBySlot.Remove(slot);
+
             // Mapchange survival (v0.5.1+): C++ Hider sets the pool's
             // mapchange flag at IMetamodListener::OnLevelShutdown — earlier
             // than the synthetic OnClientDisconnect cascade fired by
@@ -348,6 +433,8 @@ public sealed class FakeClientManager : IDisposable
             if (ctrl != null && ctrl.IsValid && ctrl.IsBot)
                 Server.ExecuteCommand($"bot_kick {fc.Name}");
         } catch { }
+        // Quota tracks (active+pending) — Despawn drops one, re-assert.
+        EnforceBotQuota();
     }
 
     public int DespawnAll(string reason)
@@ -381,6 +468,14 @@ public sealed class FakeClientManager : IDisposable
             _byId.Clear();
             _registry.ClearAllActiveSlots();
             _pendingPersonaIds.Clear();
+            _humanNamesBySlot.Clear();  // humans re-fire OnClientPutInServer on new map
+
+            // Mid-mapchange engine state has bot_quota at default (10) or
+            // whatever the new map's gamemode_*.cfg sets. Reset to 0 BEFORE
+            // we re-issue Spawn() — the supercede in CFC PRE will block any
+            // race attempt the engine makes between here and the respawn
+            // batch firing 8 ticks later.
+            Server.ExecuteCommand("bot_quota 0");
 
             // (4) Wipe pool managed[] + names — old slot indices are about
             //     to be invalid. CFC PRE / OCC will re-mark fresh slots when
@@ -448,6 +543,12 @@ public sealed class FakeClientManager : IDisposable
                 { "botId", fc.Id }, { "avgPingMs", avg },
                 { "jitterMs", fc.Profile.JitterRangeMs }, { "lossRate60s", loss } });
         }
+
+        // 1-second persistent bot_quota re-assert. Engine resets quota at
+        // warmup_end and round-restart; without periodic enforcement it
+        // creeps up to default (10) and triggers the supercede CPU-loop
+        // (320+ /sec). Cheap (one ExecuteCommand per second).
+        EnforceBotQuota();
     }
 
     private void EmitPerTickTelemetry(FakeClient fc)

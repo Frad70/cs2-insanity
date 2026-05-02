@@ -22,6 +22,8 @@
 #include <string.h>
 #include <dlfcn.h>
 
+#include <atomic>
+#include <chrono>
 #include <set>
 #include <string>
 
@@ -72,10 +74,24 @@ SH_DECL_HOOK3(INetworkGameServer, StartChangeLevel, SH_NOATTRIB, 0,
 // thread for both hooks — no synchronization needed.
 static std::set<std::string> g_ExpectedNames;
 
-// Fallback persona pool for engine-spawned bots (engine_quota / mp_warmup /
-// manual rcon bot_add) whose CSSharp hadn't pushed a name to the FIFO.
-// Cycles through deterministically.
-static const char* k_FallbackRoster[] = {
+// DEPRECATED — kept for reference / future PersonaScheduler use.
+//
+// In v0.5.1-beta this roster was the fallback for engine_quota /
+// autoteambalance / manual `bot_add` cases where the CSSharp FIFO was
+// empty. Empirical effect: ghost bots with curated names appeared on
+// slots beyond explicit `insanity_spawn_bots N` (e.g. warmup→match
+// transition spawned 5-10 extras with these names).
+//
+// In v0.5.2-beta this fallback is REMOVED from the active code path:
+// `Hook_CreateFakeClient_Pre` returns MRES_SUPERCEDE with invalid slot
+// when the FIFO is empty after a double-check fence — engine sees
+// "CreateFakeClient() returned null", logs "Unable to create bot",
+// gives up. Net effect: only Spawn()-issued bots reach OCC, no ghosts.
+//
+// Roster left here in case PersonaScheduler (P/03 step 6) wants to
+// inject names through a different path (e.g. allow engine auto-fill
+// to come up only when scheduler "wants" a session). For now: unused.
+static const char* k_FallbackRoster[] [[maybe_unused]] = {
     "kennyS",  "Magisk",  "ZywOo",   "s1mple",  "NiKo",     "device",
     "electronic","blameF","frozen",  "huNter",  "rain",     "Twistzz",
     "ropz",    "Brollan", "Aleksib", "broky",   "FaNg",     "donk",
@@ -83,7 +99,6 @@ static const char* k_FallbackRoster[] = {
     "Spinx",   "torzsi",  "stavn",   "TeSeS",   "kyxsan",   "snappi",
     "k1to",    "sjuush",
 };
-static int g_FallbackIdx = 0;
 
 InsanityHiderPlugin g_Plugin;
 PLUGIN_EXPOSE(InsanityHiderPlugin, g_Plugin);
@@ -206,17 +221,63 @@ CPlayerSlot InsanityHiderPlugin::Hook_CreateFakeClient_Pre(const char* netname) 
         RETURN_META_VALUE(MRES_IGNORED, CPlayerSlot(-1));
     }
 
-    // (1) Try CSSharp FIFO first (matches insanity_spawn_bots batches).
+    // FIFO pop attempt #1. PopFifo internally does an acquire-load on the
+    // head index, so it sees any persona pushed before its load completes.
     char fifoBuf[InsanityHider::POOL_NAME_BYTES];
     const char* persona = nullptr;
     if (m_Pool.PopFifo(fifoBuf, sizeof(fifoBuf)) && fifoBuf[0]) {
         persona = fifoBuf;
     } else {
-        // (2) Fallback roster (engine_quota / autoteambalance / manual rcon).
-        persona = k_FallbackRoster[g_FallbackIdx++ %
-            (sizeof(k_FallbackRoster) / sizeof(*k_FallbackRoster))];
+        // FIFO empty on first read = no Spawn() preceded this CreateFakeClient.
+        // Possible causes:
+        //   (a) engine match-start auto-fill (warmup→match transition) — the
+        //       primary issue P/03 step 4 is closing
+        //   (b) engine_quota / autoteambalance / mp_bots_per_team churn
+        //   (c) manual rcon `bot_add` (admin testing — no CSSharp Spawn())
+        //   (d) RACE: CSSharp Spawn() pushed FIFO between our PopFifo failure
+        //       and this branch — paranoia retry below catches it.
+        //
+        // For (a)–(c) we want SUPERCEDE: engine sees CreateFakeClient return
+        // CPlayerSlot(-1), logs "Unable to create bot" and gives up. Net
+        // effect: 0 ghost bots, only Spawn()-issued bots reach OCC.
+        //
+        // For (d): explicit acquire fence + retry. If the second pop succeeds,
+        // a legitimate Spawn() arrived in the race window — use that persona,
+        // do not silently drop. The fence is technically redundant (PopFifo's
+        // own acquire-load already orders against any release-store on head),
+        // but it documents the paranoia and costs nothing.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (m_Pool.PopFifo(fifoBuf, sizeof(fifoBuf)) && fifoBuf[0]) {
+            persona = fifoBuf;
+        } else {
+            // Confirmed empty after fence — engine auto-fill. Block creation.
+            //
+            // Rate-limited aggregate log (1 Hz). Warmup→match transition can
+            // attempt 10+ creates in a single tick burst; un-aggregated logs
+            // would spam the console and obscure other diagnostics.
+            using namespace std::chrono;
+            static int64_t s_lastFlushMs = 0;
+            static uint32_t s_supercedeCount = 0;
+            static std::string s_lastNetname;
+            int64_t nowMs = duration_cast<milliseconds>(
+                steady_clock::now().time_since_epoch()).count();
+            ++s_supercedeCount;
+            s_lastNetname = netname ? netname : "<null>";
+            if (nowMs - s_lastFlushMs >= 1000) {
+                META_CONPRINTF("[InsanityHider] CFC PRE supercede x%u in last "
+                               "%lldms (last netname='%s', FIFO empty — engine "
+                               "auto-fill blocked)\n",
+                               s_supercedeCount,
+                               (long long)(nowMs - s_lastFlushMs),
+                               s_lastNetname.c_str());
+                s_supercedeCount = 0;
+                s_lastFlushMs = nowMs;
+            }
+            RETURN_META_VALUE(MRES_SUPERCEDE, CPlayerSlot(-1));
+        }
     }
 
+    // FIFO had a persona (or race-recovered second attempt found one).
     g_ExpectedNames.insert(persona);
     META_CONPRINTF("[InsanityHider] CFC PRE override '%s' -> '%s'\n",
                    netname ? netname : "<null>", persona);
