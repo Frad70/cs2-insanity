@@ -17,6 +17,9 @@ public:
     bool IsOpen() const { return m_pBase != nullptr; }
     bool IsManaged(int slot) const;
     bool IsActive() const;
+    // Returns the persona name CSSharp wrote for this slot, or nullptr if
+    // empty/unset. The pointer aliases mmap'd memory — valid until Close().
+    const char* GetName(int slot) const;
     // Re-validates magic+version against the live mapping. Returns false if
     // the pool was recreated under our feet with a different layout — caller
     // should treat the pool as compromised and stop writing.

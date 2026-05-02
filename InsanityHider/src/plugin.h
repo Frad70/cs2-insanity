@@ -33,15 +33,23 @@ public:
     const char* GetDescription() override { return "Selective fake-client hider via direct m_bFakePlayer field write"; }
     const char* GetURL()         override { return ""; }
     const char* GetLicense()     override { return "MIT"; }
-    const char* GetVersion()     override { return "0.4.0"; }
+    const char* GetVersion()     override { return "0.5.0"; }
     const char* GetDate()        override { return __DATE__; }
     const char* GetLogTag()      override { return "INSANITYHIDER"; }
 
     InsanityHider::Pool* GetPool() { return &m_Pool; }
 
+    // CUtlString::Set(const char*) signature, resolved from libtier0.so
+    // via dlsym at Load(). Used to overwrite engine-side m_szClientName /
+    // m_Name on CServerSideClient. nullptr if dlsym failed — name overwrite
+    // disabled, byte-160 path still works.
+    using CUtlStringSetFn = void (*)(void* /*CUtlString this*/, const char*);
+    CUtlStringSetFn m_pUtlStringSet = nullptr;
+
 private:
     InsanityHider::Pool m_Pool;
     bool m_bSelfDisabled = false;  // latched on pool header corruption
+    void* m_pTier0 = nullptr;       // dlopen handle for libtier0.so
 };
 
 extern InsanityHiderPlugin g_Plugin;

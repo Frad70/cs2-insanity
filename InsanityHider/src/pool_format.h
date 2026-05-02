@@ -1,7 +1,16 @@
 // Shared layout for /tmp/insanityrevive_fake_slots.bin.
-// CSSharp-side pool writer (FakeClientManager.cs) and C++-side pool
-// reader (pool.cpp) MUST agree on these constants — if magic diverges,
-// pool fails its sanity check and the hider silently disables itself.
+// CSSharp-side pool writer (FakeClientManager.cs / PoolMmap.cs) and C++-
+// side pool reader (pool.cpp) MUST agree on these constants — if magic or
+// version diverges, pool fails its sanity check and the hider silently
+// reinitializes (CSSharp side) or self-disables (C++ side).
+//
+// Layout v2 (this file):
+//   [ 0.. 3] uint32 magic        = 'INSF' = 0x46534E49
+//   [ 4.. 7] uint32 version      = 2
+//   [ 8..11] uint32 activeFlag   = kill-switch (0/1)
+//   [12..131] uint8 managed[120] = per-slot management bit
+//   [132..3971] char names[120][32] = per-slot persona name, null-terminated
+// Total = 3972 bytes.
 
 #pragma once
 
@@ -10,17 +19,15 @@
 
 namespace InsanityHider {
 
-// "INSF" little-endian = 0x46534E49.
 constexpr uint32_t POOL_MAGIC   = 0x46534E49u;
-constexpr uint32_t POOL_VERSION = 1u;
+constexpr uint32_t POOL_VERSION = 2u;
 constexpr size_t   POOL_SLOTS   = 120;
 
-// Header: { uint32 magic, uint32 version, uint32 activeFlag } = 12 bytes.
-// activeFlag at offset 8 is the kill-switch: 0 = hider disabled, 1 = enabled.
-// CSSharp writes it via the `insanity_hider_active` ConCommand; C++ reads it
-// on every OCC. Followed by uint8_t slots[POOL_SLOTS]. Total = 132 bytes.
 constexpr size_t   POOL_HEADER_BYTES  = 12;
 constexpr size_t   POOL_ACTIVE_OFFSET = 8;
-constexpr size_t   POOL_TOTAL         = POOL_HEADER_BYTES + POOL_SLOTS;
+constexpr size_t   POOL_MANAGED_OFFSET = POOL_HEADER_BYTES;
+constexpr size_t   POOL_NAMES_OFFSET   = POOL_MANAGED_OFFSET + POOL_SLOTS;  // 132
+constexpr size_t   POOL_NAME_BYTES     = 32;
+constexpr size_t   POOL_TOTAL          = POOL_NAMES_OFFSET + (POOL_SLOTS * POOL_NAME_BYTES);
 
 } // namespace InsanityHider

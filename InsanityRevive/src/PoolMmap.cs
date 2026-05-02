@@ -1,27 +1,34 @@
 using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
+using System.Text;
 
 namespace InsanityRevive;
 
 // Shared-memory pool mirror of C++ Pool (src/pool_format.h in InsanityHider).
-// Layout (132 bytes total, little-endian):
-//   [ 0.. 3] magic = 0x46534E49 ('INSF')
-//   [ 4.. 7] version = 1
-//   [ 8..11] reserved
-//   [12..131] uint8_t slots[120]: 0=unmanaged, 1=our fake-client
+// Layout v2 (3972 bytes total, little-endian):
+//   [   0..   3] magic = 0x46534E49 ('INSF')
+//   [   4..   7] version = 2
+//   [   8..  11] activeFlag (uint32: 0 = hider disabled, 1 = enabled)
+//   [  12.. 131] managed[120] (uint8: 0 = unmanaged, 1 = our fake-client)
+//   [ 132..3971] names[120][32] (null-terminated UTF-8, max 31 chars + NUL)
 //
 // CSSharp side OWNS the pool — opens, validates/initializes, and writes
-// per-slot bytes from Spawn()/Despawn(). C++ side (InsanityHider) only
-// reads. Idempotent and atomic at byte granularity (single uint8 write).
+// per-slot management byte AND persona name. C++ side (InsanityHider)
+// reads only. Single-uint8 management writes are atomic; name writes are
+// 32-byte memcpy — torn reads are possible across the boundary, so name
+// readers should treat trailing junk past the NUL as benign.
 public sealed class PoolMmap : IDisposable
 {
-    public const uint Magic        = 0x46534E49u;
-    public const uint Version      = 1u;
-    public const int  Slots        = 120;
-    public const int  HeaderBytes  = 12;
-    public const int  ActiveOffset = 8;   // uint32 kill-switch flag (0/1)
-    public const int  Total        = HeaderBytes + Slots;
+    public const uint Magic         = 0x46534E49u;
+    public const uint Version       = 2u;
+    public const int  Slots         = 120;
+    public const int  HeaderBytes   = 12;
+    public const int  ActiveOffset  = 8;
+    public const int  ManagedOffset = HeaderBytes;
+    public const int  NamesOffset   = ManagedOffset + Slots;   // 132
+    public const int  NameBytes     = 32;
+    public const int  Total         = NamesOffset + (Slots * NameBytes);
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _va;
@@ -36,7 +43,6 @@ public sealed class PoolMmap : IDisposable
         _path = path;
         try
         {
-            // Create or grow file to expected size.
             using (var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
             {
                 if (fs.Length < Total) fs.SetLength(Total);
@@ -49,25 +55,23 @@ public sealed class PoolMmap : IDisposable
             uint version = _va.ReadUInt32(4);
             if (magic != Magic || version != Version)
             {
-                // Stale/empty file — reinitialize. C++ side will fail its
-                // sanity check during this reinit window and silently
-                // disable; the next Open from C++ catches the new state.
-                Log.Warn($"PoolMmap reinit (magic=0x{magic:X8} ver={version})");
+                // Stale or older-version pool — full reinit. v1 had no names
+                // segment; v2 needs it. Don't try to migrate — just zero.
+                Log.Warn($"PoolMmap reinit (magic=0x{magic:X8} ver={version} → v{Version})");
                 _va.Write(0, Magic);
                 _va.Write(4, Version);
-                _va.Write(8, 1u);  // active by default
-                for (int i = 0; i < Slots; i++) _va.Write(HeaderBytes + i, (byte)0);
+                _va.Write(ActiveOffset, 1u);
+                ZeroManaged();
+                ZeroNames();
             }
             else
             {
-                // Existing valid pool — restart from a clean slate. Stale
-                // marks from a prior session would otherwise let C++ Hider
-                // flip byte 160 for any client who lands in those slots.
-                // Active flag is also reset on every boot.
+                // Valid v2 pool — fresh boot still wants clean slate.
                 _va.Write(ActiveOffset, 1u);
-                for (int i = 0; i < Slots; i++) _va.Write(HeaderBytes + i, (byte)0);
+                ZeroManaged();
+                ZeroNames();
             }
-            Log.Info($"PoolMmap opened: {path} ({Slots} slots, active=1)");
+            Log.Info($"PoolMmap opened: {path} (v{Version}, {Slots} slots, active=1)");
             return true;
         }
         catch (Exception ex)
@@ -78,18 +82,30 @@ public sealed class PoolMmap : IDisposable
         }
     }
 
+    private void ZeroManaged()
+    {
+        if (_va == null) return;
+        for (int i = 0; i < Slots; i++) _va.Write(ManagedOffset + i, (byte)0);
+    }
+
+    private void ZeroNames()
+    {
+        if (_va == null) return;
+        for (int i = 0; i < Slots * NameBytes; i++) _va.Write(NamesOffset + i, (byte)0);
+    }
+
     public void Write(int slot, byte val)
     {
         if (_va == null) return;
         if (slot < 0 || slot >= Slots) return;
-        _va.Write(HeaderBytes + slot, val);
+        _va.Write(ManagedOffset + slot, val);
     }
 
     public byte Read(int slot)
     {
         if (_va == null) return 0;
         if (slot < 0 || slot >= Slots) return 0;
-        return _va.ReadByte(HeaderBytes + slot);
+        return _va.ReadByte(ManagedOffset + slot);
     }
 
     public void WriteActive(bool active)
@@ -102,6 +118,36 @@ public sealed class PoolMmap : IDisposable
     {
         if (_va == null) return false;
         return _va.ReadUInt32(ActiveOffset) != 0;
+    }
+
+    // Write persona name into per-slot 32-byte buffer. Truncates to 31 chars
+    // and always null-terminates. Empty/null name clears the slot's name.
+    public void WriteName(int slot, string? name)
+    {
+        if (_va == null) return;
+        if (slot < 0 || slot >= Slots) return;
+        var bytes = new byte[NameBytes];  // zero-init
+        if (!string.IsNullOrEmpty(name))
+        {
+            var src = Encoding.UTF8.GetBytes(name);
+            int n = Math.Min(src.Length, NameBytes - 1);
+            Array.Copy(src, bytes, n);
+            // bytes[n..] already 0 from new byte[].
+        }
+        int baseOff = NamesOffset + slot * NameBytes;
+        for (int i = 0; i < NameBytes; i++) _va.Write(baseOff + i, bytes[i]);
+    }
+
+    public string ReadName(int slot)
+    {
+        if (_va == null) return "";
+        if (slot < 0 || slot >= Slots) return "";
+        int baseOff = NamesOffset + slot * NameBytes;
+        var bytes = new byte[NameBytes];
+        for (int i = 0; i < NameBytes; i++) bytes[i] = _va.ReadByte(baseOff + i);
+        int len = 0;
+        while (len < NameBytes && bytes[len] != 0) len++;
+        return Encoding.UTF8.GetString(bytes, 0, len);
     }
 
     public void Close()
