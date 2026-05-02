@@ -55,6 +55,16 @@ public sealed class RevealController
     private bool _stage2Triggered;
     private readonly Random _rng = new();
 
+    /// <summary>
+    /// Consecutive ticks where LivingHumansCount() returned 0 during
+    /// Stage 1+2. Stage 3 only fires after this exceeds
+    /// <see cref="ZeroHumansDampenTicks"/> — rides out respawn flicker
+    /// (mp_restartgame briefly leaves the human's pawn in transient
+    /// LifeState != 0 state, which would false-trigger Stage 3).
+    /// </summary>
+    private int _zeroHumansTickCount;
+    private const int ZeroHumansDampenTicks = 64;  // 1 sec @ 64 Hz
+
     /// <summary>Bots whose loadout we've forced — used for Stage 1 weapon-lock + Stage 3 restore.</summary>
     private readonly Dictionary<int, BotCombatState> _combatState = new();
 
@@ -246,49 +256,84 @@ public sealed class RevealController
         int humanTeam = humans.Count > 0 ? (int)humans[0].TeamNum : 3;  // default human=CT
         int botTeam = humanTeam == 2 ? 3 : 2;  // opposite
 
-        // (4) Capture each bot's PRE-REVEAL team for restore at cleanup,
-        //     then SwitchTeam with cap awareness. Available slots on
-        //     target team = TeamCap minus humans already there. Bots
-        //     beyond cap go to spectator (team 1); they re-join their
-        //     pre-reveal team at CleanupReveal.
+        // (4) Capture each bot's PRE-REVEAL team. Don't SwitchTeam yet —
+        //     v0.6.0.6 fix: SwitchTeam BEFORE mp_restartgame raced with the
+        //     restart's own team-rebalance logic, leaving ~half the bots on
+        //     their original team and the rest in spectator-but-mid-respawn
+        //     limbo. New flow: capture teams now, mp_restartgame, then 1
+        //     sec later do team flip in a clean round state.
         _botPrevTeams.Clear();
+        foreach (var fc in _mgr.All) {
+            try {
+                var c = Utilities.GetPlayerFromSlot(fc.Slot);
+                if (c == null || !c.IsValid) continue;
+                int prevTeam = (int)c.TeamNum;
+                if (prevTeam >= 2) _botPrevTeams[fc.Slot] = prevTeam;
+            } catch (Exception ex) { Log.Debug($"capture team slot={fc.Slot}: {ex.Message}"); }
+        }
+
+        // (5) Clean round restart for fresh respawn state.
+        Server.ExecuteCommand("mp_restartgame 1");
+
+        // (6) +1.5s after restart: do team flip with cap awareness and
+        //     belt-and-suspenders schema-write fallback.
+        Server.RunOnTick(Server.TickCount + (int)(64 * 1.5), () => {
+            if (Stage != RevealStage.Stage1) return;
+            FlipTeamsWithCap(botTeam);
+        });
+
+        // (7) +5s after restart: teleport swarm to human centroid, then
+        //     apply knife rush. Allows team flip to settle (3.5s buffer
+        //     after FlipTeams).
+        Server.RunOnTick(Server.TickCount + 64 * 5, () => {
+            if (Stage != RevealStage.Stage1) return;
+            DeploySwarmAndKnifeRush();
+        });
+    }
+
+    /// <summary>
+    /// Move all bots to <paramref name="botTeam"/> until cap is reached,
+    /// rest to spectator. Belt-and-suspenders: SwitchTeam (proper engine
+    /// integration) THEN verify via TeamNum read. If verify fails (engine
+    /// rejected the switch), fall back to direct schema write of m_iTeamNum.
+    /// Records sentToTarget / sentToSpec / failedFlips counts.
+    /// </summary>
+    private void FlipTeamsWithCap(int botTeam)
+    {
+        var humans = LivingHumanControllers();
         int humansOnTargetTeam = humans.Count(h => (int)h.TeamNum == botTeam);
         int availableSlots = Math.Max(0, TeamCap - humansOnTargetTeam);
         int sentToTarget = 0;
         int sentToSpec = 0;
+        int verifyFailed = 0;
         foreach (var fc in _mgr.All) {
             try {
                 var c = Utilities.GetPlayerFromSlot(fc.Slot);
                 if (c == null || !c.IsValid) continue;
 
-                // Capture original team. Defensive: skip slot=1 (spectator)
-                // captures, bots already in spec wouldn't need a prev-team
-                // and could confuse restore.
-                int prevTeam = (int)c.TeamNum;
-                if (prevTeam >= 2) _botPrevTeams[fc.Slot] = prevTeam;
+                int target = sentToTarget < availableSlots ? botTeam : (int)CsTeam.Spectator;
+                c.SwitchTeam((CsTeam)target);
 
-                if (sentToTarget < availableSlots) {
-                    c.SwitchTeam((CsTeam)botTeam);
-                    sentToTarget++;
-                } else {
-                    c.SwitchTeam(CsTeam.Spectator);
-                    sentToSpec++;
+                // Verify the switch took. SwitchTeam in CSSharp 1.0.367 is
+                // queue-based; rapid-fire calls in same tick may drop some.
+                if ((int)c.TeamNum != target) {
+                    // Schema fallback — write m_iTeamNum directly.
+                    try {
+                        Schema.SetSchemaValue<byte>(c.Handle,
+                            "CCSPlayerController", "m_iTeamNum", (byte)target);
+                        Utilities.SetStateChanged(c, "CCSPlayerController", "m_iTeamNum");
+                    } catch (Exception ex) {
+                        Log.Debug($"FlipTeams schema fallback slot={fc.Slot}: {ex.Message}");
+                        verifyFailed++;
+                    }
                 }
-            } catch (Exception ex) { Log.Debug($"SwitchTeam slot={fc.Slot}: {ex.Message}"); }
+
+                if (target == botTeam) sentToTarget++;
+                else sentToSpec++;
+            } catch (Exception ex) { Log.Debug($"FlipTeams slot={fc.Slot}: {ex.Message}"); }
         }
-        Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {sentToSpec} → spectator " +
-                 $"(cap={TeamCap}, humans on target={humansOnTargetTeam})");
-
-        // (4) Clean round restart for fresh respawn state.
-        Server.ExecuteCommand("mp_restartgame 1");
-
-        // (5) After respawn settles: teleport swarm to human centroid,
-        //     then apply knife rush. 5 sec covers the 1-sec mp_restart
-        //     delay + 1-sec round restart processing + 3-sec respawn buffer.
-        Server.RunOnTick(Server.TickCount + 64 * 5, () => {
-            if (Stage != RevealStage.Stage1) return;  // re-trigger guarded
-            DeploySwarmAndKnifeRush();
-        });
+        Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {sentToSpec} → spectator, " +
+                 $"{verifyFailed} verify-fail (cap={TeamCap}, humans on target={humansOnTargetTeam})");
     }
 
     /// <summary>
@@ -567,25 +612,44 @@ public sealed class RevealController
             case RevealStage.Stage2: TickStage2(); break;
         }
 
-        // Stage 3 trigger: 0 living humans.
+        // Stage 3 trigger: 0 living humans, sustained for ≥1 sec.
+        // Dampening required because mp_restartgame at Stage 1/2 entry
+        // briefly puts ALL pawns (including humans) in transient
+        // respawn state where LifeState != 0 → LivingHumansCount() == 0
+        // for a few ticks. Without dampening, Stage 3 fires immediately
+        // after mp_restartgame even though the human is alive.
         if (Stage == RevealStage.Stage1 || Stage == RevealStage.Stage2)
         {
-            if (LivingHumansCount() == 0 && _humansAtStart > 0) EnterStage3();
+            if (LivingHumansCount() == 0 && _humansAtStart > 0) {
+                _zeroHumansTickCount++;
+                if (_zeroHumansTickCount >= ZeroHumansDampenTicks)
+                    EnterStage3();
+            } else {
+                _zeroHumansTickCount = 0;
+            }
         }
     }
 
     private void TickStage1()
     {
+        // CRITICAL ORDERING (v0.6.0.6 fix): knife enforcement runs FIRST,
+        // BEFORE any time-based gates. v0.6.0.5 had the 30s min-duration
+        // gate as an early-return at the top, which silently disabled
+        // knife enforcement during the first 30 seconds of Stage 1 —
+        // bots that respawned mid-Stage-1 (after a death-respawn cycle
+        // triggered by mp_restartgame or game logic) kept their default
+        // pistol+knife loadout, never got stripped. User observed "half
+        // bots with knives, half with pistols". This fixes it: enforce
+        // every tick regardless of elapsed time.
+        EnforceKnifeOnAll();
+
         // Stage 2 trigger logic (v0.6.0.5 user-spec):
-        //   - HARD MINIMUM Stage1MinDurationSec: nothing fires before this,
-        //     even if all bots are dead. Stage 1 always lasts ≥ 30 sec.
+        //   - HARD MINIMUM Stage1MinDurationSec.
         //   - After minimum: fire on EITHER 50% bots dead OR 60s timeout.
-        //   - 50% computed against CONFIG fleet size (not current alive
-        //     count), so threshold doesn't shrink as bots die.
         var elapsedTicks = Server.TickCount - _stageStartTick;
         var elapsedSec = elapsedTicks / 64;
 
-        if (elapsedSec < Stage1MinDurationSec) return;  // hard gate
+        if (elapsedSec < Stage1MinDurationSec) return;  // hard gate (transition only)
 
         var killThreshold = _mgr.Config.Stage2Kills > 0
             ? _mgr.Config.Stage2Kills
@@ -597,7 +661,16 @@ public sealed class RevealController
             EnterStage2();
             return;
         }
+    }
 
+    /// <summary>
+    /// Strips and re-equips weapon_knife on every living bot — runs
+    /// every Stage 1 tick. Idempotent (no-op if bot already holds knife).
+    /// </summary>
+    private void EnforceKnifeOnAll()
+    {
+        // (Old comment block from TickStage1 still applies here:)
+        //
         // Continuous knife-only enforcement on ALL living bots — not
         // gated by _combatState membership. Catches:
         //  - bots whose ApplyKnifeRush hasn't run yet (5-sec swarm-deploy
@@ -653,12 +726,24 @@ public sealed class RevealController
     public void OnPlayerDeath(int victimSlot, bool victimIsBot)
     {
         if (Stage == RevealStage.Idle) return;
-        if (victimIsBot)
+
+        // FIX (v0.6.0.6): re-derive bot-ness from pool authoritatively
+        // instead of trusting caller's flag. The caller (InsanityRevivePlugin
+        // dispatcher) computes `victimIsBot = c.IsBot OR FindBySlot != null`,
+        // but `c.IsBot` is FALSE for our bots (we flipped m_bFakePlayer=0)
+        // AND FindBySlot can return null in transient states (mid-Despawn,
+        // mid-mapchange). When the cached flag is wrong, slow-mo fired on
+        // bot deaths. Source-of-truth check: IS the slot in our managed
+        // pool right now? If yes → bot. Else → real human.
+        bool actuallyManagedBot = _mgr.FindBySlot(victimSlot) != null;
+
+        if (actuallyManagedBot)
         {
             _botsKilledThisReveal++;
             return;
         }
-        // Human died — slowmo death cam (Stage 2 only).
+
+        // True human died — slowmo death cam (Stage 2 only).
         if (Stage == RevealStage.Stage2)
         {
             Server.ExecuteCommand("host_timescale 0.3");
