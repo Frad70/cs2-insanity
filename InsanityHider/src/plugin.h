@@ -26,6 +26,13 @@ public:
     // and CPiS via OnClientConnected listener; this hook then sees pool
     // [slot]==1 and flips byte 160 just like the OCC path.
     void Hook_ClientPutInServer_Post(CPlayerSlot slot, char const* pszName, int type, uint64 xuid);
+
+    // PRE-hook on IVEngineServer2::CreateFakeClient. Fires before engine
+    // allocates the CServerSideClient and starts the connect chain. Pops a
+    // persona from the pool FIFO (filled by CSSharp Spawn() before bot_add)
+    // or falls back to a built-in roster, then SUPERSEDEs the call with
+    // override netname so userinfo broadcast carries our name natively.
+    CPlayerSlot Hook_CreateFakeClient_Pre(const char* netname);
     void OnLevelInit(char const* pMapName, char const*, char const*, char const*, bool, bool) override;
 
     const char* GetAuthor()      override { return "frad70"; }

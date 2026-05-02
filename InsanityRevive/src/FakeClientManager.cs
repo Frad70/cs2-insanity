@@ -97,24 +97,18 @@ public sealed class FakeClientManager : IDisposable
         _pool.Close();
     }
 
-    // Lowest pool slot not yet claimed. Pool is the source of truth:
-    // batch insanity_spawn_bots N runs all Spawn() calls synchronously
-    // before any adopt fires, so Utilities.GetPlayers() is empty and
-    // useless here. Pool[i]=1 is set inside Spawn() pre-mark; subsequent
-    // FindFreeSlot finds the next unset slot.
-    private int FindFreeSlot()
-    {
-        for (int i = 0; i < 64; i++) if (_pool.Read(i) == 0) return i;
-        return -1;
-    }
-
-    // Spawn: pre-mark pool, then bot_add. Adoption itself is event-
-    // driven via OnClientPutInServer, keyed off IsBot + slot ownership.
+    // Spawn: pick next persona, push to FIFO (consumed by C++ Hider's
+    // CFC PRE override). Engine processes bot_add and asks for fake-client
+    // creation; C++ pops our persona and replaces engine's bot_names.txt
+    // pick natively, so userinfo broadcast carries the persona name.
     public void Spawn(FakeTeam team)
     {
-        var idx = FindFreeSlot();
-        if (idx < 0) { Log.Warn("Spawn: no free slot in [0..63]"); return; }
-        _pool.Write(idx, 1);
+        var persona = PickName(_nextId + _commandSpawnsPending);
+        if (!_pool.PushFifo(persona))
+        {
+            Log.Warn($"Spawn: FIFO full ({PoolMmap.FifoCapacity}), drop");
+            return;
+        }
         _commandSpawnsPending++;
         Server.ExecuteCommand(team == FakeTeam.CT ? "bot_add ct" : "bot_add t");
     }
@@ -134,26 +128,9 @@ public sealed class FakeClientManager : IDisposable
     // hook — the latter then fires with pool[slot]==1 and writes byte 160.
     public void OnClientConnected(int slot)
     {
-        try {
-            var c = Utilities.GetPlayerFromSlot(slot);
-            if (c == null || c.IsHLTV) return;
-            // Mark pool only for bots — gate on c.IsBot (m_bFakePlayer still
-            // 0x01 here for engine-spawned, since C++ Hider OCC post-hook
-            // skips them; Spawn() pre-marked path already has pool[slot]=1
-            // so the write is idempotent). Humans never hit this branch.
-            if (!c.IsBot) return;
-            if (!_pool.ReadActive()) return;
-            if (_pool.Read(slot) == 0) _pool.Write(slot, 1);
-            // Publish persona name BEFORE C++ Hider's CPiS post-hook fires.
-            // The hook reads pool.GetName(slot) and calls CUtlString::Set on
-            // engine-side m_Name. AdoptController runs later (in OnClient
-            // PutInServer listener); it will read the same name back and use
-            // it for Schema overwrite, keeping engine and Schema in sync.
-            if (string.IsNullOrEmpty(_pool.ReadName(slot)))
-            {
-                _pool.WriteName(slot, PickName(_nextId));
-            }
-        } catch (Exception ex) { Log.Error($"OnClientConnected slot={slot}: {ex.Message}"); }
+        // Pool managed/name marking moved to C++ Hider (CFC PRE → OCC mark).
+        // This listener is now a no-op for the pool path; kept as a hook so
+        // the listener registration doesn't 404 in the plugin.
     }
 
     public void OnClientPutInServer(int slot)
@@ -161,11 +138,17 @@ public sealed class FakeClientManager : IDisposable
         try {
             var c = Utilities.GetPlayerFromSlot(slot);
             if (c == null || !c.IsValid || c.IsHLTV) return;
-            // Gate on pool, not c.IsBot. By the time CSSharp's listener fires
-            // here, C++ Hider's CPiS post-hook has already flipped byte 160
-            // for managed slots — c.IsBot would return False even for our
-            // bots, blocking AdoptController. Pool flag is the source-of-
-            // truth for "managed bot" at this point.
+
+            // Real human guard — they have a Steam-authorized SteamID even
+            // after our byte-160 flip. Bots never have one. Defends against
+            // orphaned pool[slot]=1 marks from previous bots whose Despawn
+            // didn't fire (engine kicks etc.).
+            if (c.AuthorizedSteamID != null) return;
+
+            // Gate on pool, not c.IsBot. By the time this listener fires,
+            // C++ Hider's CPiS post-hook has already flipped byte 160 for
+            // managed slots — c.IsBot would return False. Pool flag is the
+            // source of truth for "managed bot" at this point.
             if (_pool.Read(slot) == 0) return;
             if (_byId.Values.Any(b => b.Slot == slot)) return;
             BotIdentity? restore = _restoreQueue.Count > 0 ? _restoreQueue.Dequeue() : null;
@@ -177,7 +160,21 @@ public sealed class FakeClientManager : IDisposable
     {
         try {
             var fc = _byId.Values.FirstOrDefault(b => b.Slot == slot);
-            if (fc != null) Despawn(fc.Id, "client_disconnect");
+            if (fc != null) {
+                Despawn(fc.Id, "client_disconnect");
+            } else {
+                // Orphan cleanup: pool[slot] may have been marked in earlier
+                // session (mapchange, plugin reload, etc.) without a matching
+                // _byId entry. Without this, the next client to land on this
+                // slot — possibly a real human — would inherit the mark and
+                // get adopted as a bot. Belt-and-braces with the Authorized
+                // SteamID gate in OnClientPutInServer.
+                if (_pool.Read(slot) != 0) {
+                    _pool.Write(slot, 0);
+                    _pool.WriteName(slot, "");
+                    Log.Info($"orphan pool cleanup slot={slot}");
+                }
+            }
         } catch (Exception ex) { Log.Error($"OnClientDisconnect slot={slot}: {ex.Message}"); }
     }
 
@@ -326,7 +323,11 @@ public sealed class FakeClientManager : IDisposable
         try
         {
             var c = Utilities.GetPlayerFromSlot(slot);
-            if (c == null || !c.IsValid || !c.IsBot) return;
+            if (c == null || !c.IsValid) return;
+            // c.IsBot is now False for managed bots (C++ Hider already wrote
+            // m_bFakePlayer=0); pool flag is the trustworthy "managed bot"
+            // signal. Same gate fix as OnClientPutInServer.
+            if (_pool.Read(slot) == 0 && !c.IsBot) return;
             if (string.Equals(c.PlayerName, fc.Name, StringComparison.Ordinal)) return;
             fc.OverwriteNameOnController(c); // name-only — see FakeClient.cs
         }

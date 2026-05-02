@@ -7,13 +7,15 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+#include <atomic>
 
 namespace InsanityHider {
 
 bool Pool::Open(const char* path) {
     Close();
 
-    m_iFd = ::open(path, O_RDONLY);
+    // Writable since v3 — C++ side marks managed slots from CFC PRE / OCC.
+    m_iFd = ::open(path, O_RDWR);
     if (m_iFd < 0) {
         snprintf(m_szError, sizeof(m_szError),
                  "open(%s) failed: errno=%d %s", path, errno, strerror(errno));
@@ -34,7 +36,7 @@ bool Pool::Open(const char* path) {
         return false;
     }
 
-    void* base = mmap(nullptr, POOL_TOTAL, PROT_READ, MAP_SHARED, m_iFd, 0);
+    void* base = mmap(nullptr, POOL_TOTAL, PROT_READ | PROT_WRITE, MAP_SHARED, m_iFd, 0);
     if (base == MAP_FAILED) {
         snprintf(m_szError, sizeof(m_szError),
                  "mmap failed: errno=%d %s", errno, strerror(errno));
@@ -46,8 +48,7 @@ bool Pool::Open(const char* path) {
     uint32_t magic = u32[0], version = u32[1];
     if (magic != POOL_MAGIC) {
         snprintf(m_szError, sizeof(m_szError),
-                 "magic mismatch: got 0x%08x want 0x%08x — refusing to use stale pool",
-                 magic, POOL_MAGIC);
+                 "magic mismatch: got 0x%08x want 0x%08x", magic, POOL_MAGIC);
         munmap(base, POOL_TOTAL);
         Close();
         return false;
@@ -81,7 +82,7 @@ void Pool::Close() {
 bool Pool::IsManaged(int slot) const {
     if (!m_pBase) return false;
     if (slot < 0 || slot >= (int)POOL_SLOTS) return false;
-    auto* slots = reinterpret_cast<const uint8_t*>(m_pBase) + POOL_HEADER_BYTES;
+    auto* slots = reinterpret_cast<const uint8_t*>(m_pBase) + POOL_MANAGED_OFFSET;
     return slots[slot] != 0;
 }
 
@@ -103,6 +104,50 @@ const char* Pool::GetName(int slot) const {
     if (slot < 0 || slot >= (int)POOL_SLOTS) return nullptr;
     auto* p = reinterpret_cast<const char*>(m_pBase) + POOL_NAMES_OFFSET + slot * POOL_NAME_BYTES;
     return p[0] ? p : nullptr;
+}
+
+void Pool::WriteManaged(int slot, uint8_t val) {
+    if (!m_pBase) return;
+    if (slot < 0 || slot >= (int)POOL_SLOTS) return;
+    auto* slots = reinterpret_cast<uint8_t*>(m_pBase) + POOL_MANAGED_OFFSET;
+    slots[slot] = val;
+}
+
+void Pool::WriteName(int slot, const char* name) {
+    if (!m_pBase) return;
+    if (slot < 0 || slot >= (int)POOL_SLOTS) return;
+    auto* dst = reinterpret_cast<char*>(m_pBase) + POOL_NAMES_OFFSET + slot * POOL_NAME_BYTES;
+    if (!name || !name[0]) {
+        memset(dst, 0, POOL_NAME_BYTES);
+        return;
+    }
+    size_t n = strnlen(name, POOL_NAME_BYTES - 1);
+    memcpy(dst, name, n);
+    dst[n] = '\0';
+    if (n + 1 < POOL_NAME_BYTES) memset(dst + n + 1, 0, POOL_NAME_BYTES - n - 1);
+}
+
+bool Pool::PopFifo(char* outBuf, size_t outBufBytes) {
+    if (!m_pBase || !outBuf || outBufBytes == 0) return false;
+    auto* base = reinterpret_cast<uint8_t*>(m_pBase);
+    auto* phead = reinterpret_cast<std::atomic<uint32_t>*>(base + POOL_FIFO_HEAD_OFFSET);
+    auto* ptail = reinterpret_cast<std::atomic<uint32_t>*>(base + POOL_FIFO_TAIL_OFFSET);
+    uint32_t head = phead->load(std::memory_order_acquire);
+    uint32_t tail = ptail->load(std::memory_order_relaxed);
+    if (head == tail) return false;  // empty
+    const char* slot = reinterpret_cast<const char*>(
+        base + POOL_FIFO_OFFSET + (tail % POOL_FIFO_CAPACITY) * POOL_NAME_BYTES);
+    size_t n = strnlen(slot, POOL_NAME_BYTES);
+    if (n == 0) {
+        // Empty slot — treat as no entry, advance tail to skip.
+        ptail->store(tail + 1, std::memory_order_release);
+        return false;
+    }
+    if (n >= outBufBytes) n = outBufBytes - 1;
+    memcpy(outBuf, slot, n);
+    outBuf[n] = '\0';
+    ptail->store(tail + 1, std::memory_order_release);
+    return true;
 }
 
 } // namespace InsanityHider

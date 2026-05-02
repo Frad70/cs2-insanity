@@ -1,8 +1,8 @@
-// mmap reader for the CSSharp ↔ C++ shared slot pool. CSSharp side
-// writes a byte per slot to mark "this slot is one of our managed
-// fake-clients". C++ side mmap's the same file READ-only and consults
-// pool[idx] inside the OnClientConnected handler to decide whether to
-// flip m_bFakePlayer.
+// mmap'd shared pool, writable on the C++ side as of v3. CSSharp owns the
+// schema (sets active flag on boot, clears slots on Despawn, pushes pending
+// personas to the FIFO). C++ also writes managed/name when CFC PRE override
+// fires — at OCC time the slot is known and we mark it ourselves so CSSharp
+// doesn't have to predict it.
 
 #pragma once
 
@@ -17,13 +17,16 @@ public:
     bool IsOpen() const { return m_pBase != nullptr; }
     bool IsManaged(int slot) const;
     bool IsActive() const;
-    // Returns the persona name CSSharp wrote for this slot, or nullptr if
-    // empty/unset. The pointer aliases mmap'd memory — valid until Close().
-    const char* GetName(int slot) const;
-    // Re-validates magic+version against the live mapping. Returns false if
-    // the pool was recreated under our feet with a different layout — caller
-    // should treat the pool as compromised and stop writing.
     bool RevalidateHeader() const;
+    const char* GetName(int slot) const;
+
+    // Writes (writable mmap, v3+).
+    void WriteManaged(int slot, uint8_t val);
+    void WriteName(int slot, const char* name);
+    // Pop one pending persona from the FIFO. Copies into outBuf (always
+    // null-terminates). Returns true if a name was popped, false if FIFO empty.
+    bool PopFifo(char* outBuf, size_t outBufBytes);
+
     const char* LastError() const { return m_szError; }
 
 private:
