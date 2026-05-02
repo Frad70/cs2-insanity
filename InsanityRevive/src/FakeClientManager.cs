@@ -137,10 +137,12 @@ public sealed class FakeClientManager : IDisposable
         try {
             var c = Utilities.GetPlayerFromSlot(slot);
             if (c == null || c.IsHLTV) return;
-            // Write the mark unconditionally for bots (or anything where
-            // we couldn't tell yet); idempotent. Real humans never reach
-            // this — they don't trigger OCC with bFakePlayer=1, and the
-            // C++ Hider's CPiS post-hook gates on type==1 anyway.
+            // Mark pool only for bots — gate on c.IsBot here (m_bFakePlayer
+            // still 0x01 at this point for engine-spawned, since C++ Hider
+            // OCC post-hook skips them; Spawn() pre-marked path already has
+            // pool[slot]=1 so the write is idempotent). Humans never hit
+            // this branch (c.IsBot=False) and stay unmarked.
+            if (!c.IsBot) return;
             if (_pool.ReadActive() && _pool.Read(slot) == 0)
             {
                 _pool.Write(slot, 1);
@@ -152,7 +154,13 @@ public sealed class FakeClientManager : IDisposable
     {
         try {
             var c = Utilities.GetPlayerFromSlot(slot);
-            if (c == null || !c.IsValid || !c.IsBot || c.IsHLTV) return;
+            if (c == null || !c.IsValid || c.IsHLTV) return;
+            // Gate on pool, not c.IsBot. By the time CSSharp's listener fires
+            // here, C++ Hider's CPiS post-hook has already flipped byte 160
+            // for managed slots — c.IsBot would return False even for our
+            // bots, blocking AdoptController. Pool flag is the source-of-
+            // truth for "managed bot" at this point.
+            if (_pool.Read(slot) == 0) return;
             if (_byId.Values.Any(b => b.Slot == slot)) return;
             BotIdentity? restore = _restoreQueue.Count > 0 ? _restoreQueue.Dequeue() : null;
             AdoptController(c, restore);
@@ -169,10 +177,16 @@ public sealed class FakeClientManager : IDisposable
 
     public void AdoptExistingBots()
     {
+        // Hot reload: bots may already have m_bFakePlayer=0 written by a
+        // previous Hider session (c.IsBot=False). Accept either signal —
+        // the engine's bot bit (live state) OR our pool mark (persisted).
         foreach (var c in Utilities.GetPlayers())
         {
-            if (c == null || !c.IsValid || !c.IsBot || c.IsHLTV) continue;
+            if (c == null || !c.IsValid || c.IsHLTV) continue;
+            if (!c.IsBot && _pool.Read(c.Slot) == 0) continue;
             if (_byId.Values.Any(b => b.Slot == c.Slot)) continue;
+            // Make sure pool reflects management before AdoptController.
+            if (_pool.Read(c.Slot) == 0) _pool.Write(c.Slot, 1);
             AdoptController(c, _restoreQueue.Count > 0 ? _restoreQueue.Dequeue() : null);
         }
     }
