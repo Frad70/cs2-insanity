@@ -7,33 +7,45 @@ using System.Threading;
 namespace InsanityRevive;
 
 // Shared-memory pool mirror of C++ Pool (src/pool_format.h in InsanityHider).
-// Layout v2 (3972 bytes total, little-endian):
+// Layout v4 (4496 bytes total, little-endian):
 //   [   0..   3] magic = 0x46534E49 ('INSF')
-//   [   4..   7] version = 2
+//   [   4..   7] version = 4
 //   [   8..  11] activeFlag (uint32: 0 = hider disabled, 1 = enabled)
-//   [  12.. 131] managed[120] (uint8: 0 = unmanaged, 1 = our fake-client)
-//   [ 132..3971] names[120][32] (null-terminated UTF-8, max 31 chars + NUL)
+//   [  12..  15] mapchangeFlag (uint32: 0 = idle, 1 = mapchange in progress)
+//   [  16.. 135] managed[120] (uint8: 0 = unmanaged, 1 = our fake-client)
+//   [ 136..3975] names[120][32] (null-terminated UTF-8, max 31 chars + NUL)
+//   [3976..4487] fifoBuf[16][32]
+//   [4488..4491] fifoHead
+//   [4492..4495] fifoTail
 //
 // CSSharp side OWNS the pool — opens, validates/initializes, and writes
 // per-slot management byte AND persona name. C++ side (InsanityHider)
 // reads only. Single-uint8 management writes are atomic; name writes are
 // 32-byte memcpy — torn reads are possible across the boundary, so name
 // readers should treat trailing junk past the NUL as benign.
+//
+// activeFlag and mapchangeFlag are SEPARATE uint32 words to avoid bit-stomp
+// races (kill-switch toggle never clobbers mapchange flag and vice versa).
+// SPSC discipline:
+//   activeFlag    — CSSharp writes (kill-switch console cmd), C++ reads
+//   mapchangeFlag — C++ writes at OnLevelShutdown (true), CSSharp clears
+//                   at OnMapStart (false). CSSharp reads at OnClientDisconnect.
 public sealed class PoolMmap : IDisposable
 {
-    public const uint Magic         = 0x46534E49u;
-    public const uint Version       = 3u;
-    public const int  Slots         = 120;
-    public const int  HeaderBytes   = 12;
-    public const int  ActiveOffset  = 8;
-    public const int  ManagedOffset = HeaderBytes;
-    public const int  NamesOffset   = ManagedOffset + Slots;   // 132
-    public const int  NameBytes     = 32;
-    public const int  FifoCapacity  = 16;
-    public const int  FifoOffset    = NamesOffset + (Slots * NameBytes);   // 3972
-    public const int  FifoHeadOffset = FifoOffset + (FifoCapacity * NameBytes);  // 4484
-    public const int  FifoTailOffset = FifoHeadOffset + 4;                      // 4488
-    public const int  Total         = FifoTailOffset + 4;                       // 4492
+    public const uint Magic            = 0x46534E49u;
+    public const uint Version          = 4u;
+    public const int  Slots            = 120;
+    public const int  HeaderBytes      = 16;
+    public const int  ActiveOffset     = 8;
+    public const int  MapchangeOffset  = 12;
+    public const int  ManagedOffset    = HeaderBytes;                   // 16
+    public const int  NamesOffset      = ManagedOffset + Slots;         // 136
+    public const int  NameBytes        = 32;
+    public const int  FifoCapacity     = 16;
+    public const int  FifoOffset       = NamesOffset + (Slots * NameBytes);   // 3976
+    public const int  FifoHeadOffset   = FifoOffset + (FifoCapacity * NameBytes);  // 4488
+    public const int  FifoTailOffset   = FifoHeadOffset + 4;                       // 4492
+    public const int  Total            = FifoTailOffset + 4;                       // 4496
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _va;
@@ -60,25 +72,27 @@ public sealed class PoolMmap : IDisposable
             uint version = _va.ReadUInt32(4);
             if (magic != Magic || version != Version)
             {
-                // Stale or older-version pool — full reinit. Don't try to
-                // migrate — restart-time state is ephemeral.
+                // Stale or older-version pool — full reinit. v3 → v4 layout
+                // shift makes any preserved bytes meaningless; safest to wipe.
                 Log.Warn($"PoolMmap reinit (magic=0x{magic:X8} ver={version} → v{Version})");
                 _va.Write(0, Magic);
                 _va.Write(4, Version);
                 _va.Write(ActiveOffset, 1u);
+                _va.Write(MapchangeOffset, 0u);
                 ZeroManaged();
                 ZeroNames();
                 ZeroFifo();
             }
             else
             {
-                // Valid v3 pool — fresh boot still wants clean slate.
+                // Valid v4 pool — fresh boot still wants clean slate.
                 _va.Write(ActiveOffset, 1u);
+                _va.Write(MapchangeOffset, 0u);
                 ZeroManaged();
                 ZeroNames();
                 ZeroFifo();
             }
-            Log.Info($"PoolMmap opened: {path} (v{Version}, {Slots} slots, active=1)");
+            Log.Info($"PoolMmap opened: {path} (v{Version}, {Slots} slots, active=1, mapchange=0)");
             return true;
         }
         catch (Exception ex)
@@ -133,6 +147,22 @@ public sealed class PoolMmap : IDisposable
     {
         if (_va == null) return false;
         return _va.ReadUInt32(ActiveOffset) != 0;
+    }
+
+    // Mapchange flag: C++ side sets at OnLevelShutdown (true), CSSharp side
+    // reads at OnClientDisconnect to skip Despawn during the synthetic
+    // disconnect cascade, and clears at OnMapStart after snapshotting the
+    // active personas. SPSC at any moment — only one side writes at a time.
+    public void WriteMapchangeFlag(bool inProgress)
+    {
+        if (_va == null) return;
+        _va.Write(MapchangeOffset, inProgress ? 1u : 0u);
+    }
+
+    public bool IsMapchangeInProgress()
+    {
+        if (_va == null) return false;
+        return _va.ReadUInt32(MapchangeOffset) != 0;
     }
 
     // Write persona name into per-slot 32-byte buffer. Truncates to 31 chars

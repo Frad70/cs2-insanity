@@ -6,7 +6,12 @@
 
 #include "pool.h"
 
+// Pulled in for the StartChangeLevel hook return type. SourceHook requires
+// the exact member-fn-ptr type (compiler rejects cross-cast to void*).
+#include <tier1/utlvector.h>
+
 class CServerSideClient;
+class INetworkGameClient;
 
 class InsanityHiderPlugin : public ISmmPlugin, public IMetamodListener {
 public:
@@ -35,6 +40,26 @@ public:
     CPlayerSlot Hook_CreateFakeClient_Pre(const char* netname);
     void OnLevelInit(char const* pMapName, char const*, char const*, char const*, bool, bool) override;
 
+    // Mapchange survival hook chain:
+    //  - INetworkGameServer::StartChangeLevel PRE (this hook, parameterized
+    //    variant): EARLIEST point in the changelevel sequence — engine logs
+    //    "CNetworkServerService::StartChangeLevel( (no landmark) )" and
+    //    starts client tear-down here. PRE-hook fires before disconnect
+    //    cascade. Sets shm flag so CSSharp's OnClientDisconnect skips
+    //    Despawn for synthetic disconnects.
+    //  - INetworkServerService::StartChangeLevel(void) — the void variant
+    //    fires LATER (after disconnects, before LevelShutdown). Empirically
+    //    too late on its own. Not hooked.
+    //  - IMetamodListener::OnLevelShutdown (kept, redundant): fires too late
+    //    (AFTER LoopDeactivate cascade — verified empirically 2026-05-02).
+    //    Kept as belt-and-braces in case another mapchange path bypasses
+    //    StartChangeLevel.
+    //  - CSSharp OnMapStart: clears the flag after snapshot (see
+    //    FakeClientManager.OnMapStart).
+    CUtlVector<INetworkGameClient*>* Hook_StartChangeLevel_Pre(
+        const char* mapName, const char* landmark, void* changelevelState);
+    void OnLevelShutdown() override;
+
     const char* GetAuthor()      override { return "frad70"; }
     const char* GetName()        override { return "InsanityHider"; }
     const char* GetDescription() override { return "Selective fake-client hider via direct m_bFakePlayer field write"; }
@@ -56,6 +81,7 @@ public:
 private:
     InsanityHider::Pool m_Pool;
     bool m_bSelfDisabled = false;  // latched on pool header corruption
+    void* m_pHookedGameServer = nullptr;  // last instance hooked; null = unhooked
     void* m_pTier0 = nullptr;       // dlopen handle for libtier0.so
 };
 

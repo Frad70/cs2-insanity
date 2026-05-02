@@ -11,6 +11,7 @@ public enum FakeTeam { CT = 3, T = 2 }
 public sealed class FakeClient
 {
     public int    Id        { get; }
+    public int    PersonaId { get; }
     public string Name      { get; private set; }
     public ulong  SteamId64 { get; }
     public FakeTeam Team    { get; private set; }
@@ -27,9 +28,10 @@ public sealed class FakeClient
     private long _summaryLatencyAcc;
     private int _summaryLossEvents;
 
-    public FakeClient(int id, string name, ulong steamId, FakeTeam team, NetworkProfile profile)
+    public FakeClient(int id, int personaId, string name, ulong steamId, FakeTeam team, NetworkProfile profile)
     {
         Id        = id;
+        PersonaId = personaId;
         Name      = name;
         SteamId64 = steamId;
         Team      = team;
