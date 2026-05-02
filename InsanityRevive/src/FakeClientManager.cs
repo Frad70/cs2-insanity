@@ -114,6 +114,11 @@ public sealed class FakeClientManager : IDisposable
 
     public IReadOnlyCollection<FakeClient> All => _byId.Values;
 
+    /// <summary>FleetManager-friendly accessors (v0.6.0+).</summary>
+    public int PendingPersonaCount => _pendingPersonaIds.Count;
+    public bool IsMapchangeInProgress => _pool.IsMapchangeInProgress();
+    public FleetManager Fleet { get; private set; } = null!;
+
     public FakeClientManager(Config cfg, Telemetry telemetry)
     {
         Config = cfg;
@@ -121,6 +126,7 @@ public sealed class FakeClientManager : IDisposable
         SteamIds = SteamIdProviderFactory.Create(cfg, telemetry.SessionId);
         Detour = new ProcessUsercmdsDetour();
         _registry = new PersonaRegistry();
+        Fleet = new FleetManager(this);
     }
 
     public void OnLoad(string csVersion)
@@ -518,6 +524,12 @@ public sealed class FakeClientManager : IDisposable
                     }
                 });
             }
+
+            // (8) Mark fleet ready — Reconcile() will now run from Tick at 1Hz.
+            //     If snapshot.Count < FleetSize, reconcile will top up; if >,
+            //     it will trim. On boot (snapshot empty), reconcile spawns
+            //     up to FleetSize from a clean slate.
+            Fleet.OnMapStartComplete();
         } catch (Exception ex) { Log.Error($"OnMapStart: {ex.Message}"); }
     }
 
@@ -526,6 +538,7 @@ public sealed class FakeClientManager : IDisposable
     public void OnTick()
     {
         _tick++; _ticksSinceSummary++;
+        Fleet.OnTick();
         foreach (var fc in _byId.Values)
         {
             CCSPlayerController? c = null;
