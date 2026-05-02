@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace InsanityRevive;
 
@@ -44,6 +45,20 @@ public sealed class PersonaRegistry
     /// <summary>All personas, in Id order.</summary>
     public IEnumerable<Persona> All => _byId.Values.OrderBy(p => p.Id);
 
+    /// <summary>
+    /// Sentinel pattern for fallback-mint names from v0.5.1-beta era.
+    /// Match-fill from engine_quota in v0.5.1-beta could exhaust the
+    /// roster before the registry was populated, falling through to
+    /// `player&lt;Id&gt;` synthesis. These records have no real human
+    /// gameplay value (the persona never carried distinguishing
+    /// behavioral state) — discard on load so v0.5.2-beta starts with
+    /// only meaningful personas. Going forward, CFC PRE empty-FIFO
+    /// supercede prevents engine_quota from ever reaching CSSharp
+    /// AcquireForSpawn, so this regex should rarely match.
+    /// </summary>
+    private static readonly Regex SentinelPattern =
+        new(@"^player\d+$", RegexOptions.Compiled);
+
     public void Load()
     {
         try {
@@ -54,8 +69,16 @@ public sealed class PersonaRegistry
             var json = File.ReadAllText(_path);
             var arr = JsonSerializer.Deserialize<List<Persona>>(json) ?? new();
             _byId.Clear();
+            int dropped = 0;
             foreach (var p in arr) {
                 if (p.Id <= 0 || string.IsNullOrEmpty(p.Name)) continue;
+                // v0.5.2-beta migration: drop "playerN" sentinel garbage
+                // from v0.5.1-beta's empty-FIFO fallback. Real personas
+                // (LastSeenAt populated, name from roster, etc.) survive.
+                if (SentinelPattern.IsMatch(p.Name)) {
+                    dropped++;
+                    continue;
+                }
                 _byId[p.Id] = p;
                 if (p.Id >= _nextId) _nextId = p.Id + 1;
                 // Volatile field — never trust ActiveOnSlot from disk.
@@ -63,7 +86,9 @@ public sealed class PersonaRegistry
                 p.ActiveOnSlot = null;
             }
             Log.Info($"PersonaRegistry: loaded {_byId.Count} personas " +
-                     $"(nextId={_nextId}) from {_path}");
+                     $"(nextId={_nextId}, dropped {dropped} sentinel) " +
+                     $"from {_path}");
+            if (dropped > 0) Save();  // persist migration immediately
         } catch (Exception ex) {
             Log.Error($"PersonaRegistry load failed: {ex.Message} — starting empty");
             _byId.Clear();
@@ -126,9 +151,17 @@ public sealed class PersonaRegistry
     {
         var nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 
+        // CONTRACT: `reservedNames` is a set of NORMALIZED keys (NFKC +
+        // lowercase + trim, see FakeClientManager.Normalize). Display
+        // names in the registry preserve original case; we normalize
+        // them here for the lookup so 'kennyS' (registry) collides with
+        // 'KennyS' (human) regardless of how either was capitalized.
+        static string Norm(string s) => string.IsNullOrEmpty(s) ? string.Empty
+            : s.Normalize(System.Text.NormalizationForm.FormKC).Trim().ToLowerInvariant();
+
         // (1) Reuse a dormant persona.
         var dormant = OrderForReuse(_byId.Values.Where(p => !p.IsActive))
-            .FirstOrDefault(p => !reservedNames.Contains(p.Name));
+            .FirstOrDefault(p => !reservedNames.Contains(Norm(p.Name)));
         if (dormant != null) {
             dormant.LastSeenAt = nowIso;
             Save();
@@ -136,14 +169,23 @@ public sealed class PersonaRegistry
         }
 
         // (2) Mint from fallback roster.
-        var existingNames = new HashSet<string>(
-            _byId.Values.Select(p => p.Name), StringComparer.Ordinal);
+        var existingNorm = new HashSet<string>(
+            _byId.Values.Select(p => Norm(p.Name)), StringComparer.Ordinal);
         var newName = fallbackRoster
-            .FirstOrDefault(n => !reservedNames.Contains(n)
-                              && !existingNames.Contains(n));
+            .FirstOrDefault(n => !reservedNames.Contains(Norm(n))
+                              && !existingNorm.Contains(Norm(n)));
 
         // (3) Synthesize as last resort.
-        newName ??= $"player{_nextId}";
+        // POST-v0.5.2: this branch should be unreachable in normal flow —
+        // CFC PRE empty-FIFO supercede prevents engine_quota cascades that
+        // exhaust the roster. If we hit it, log loudly: it means batch
+        // size > roster size (32 entries), which is a config/usage issue.
+        if (newName == null) {
+            Log.Warn($"AcquireForSpawn: roster exhausted (reserved={reservedNames.Count}, " +
+                     $"existing={existingNorm.Count}). Synthesizing player{_nextId} sentinel — " +
+                     $"will be GC'd on next Load() per migration regex.");
+            newName = $"player{_nextId}";
+        }
 
         var persona = new Persona(_nextId++, newName, nowIso);
         _byId[persona.Id] = persona;
