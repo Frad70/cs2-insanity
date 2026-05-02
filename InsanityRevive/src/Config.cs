@@ -52,6 +52,29 @@ public sealed class Config
     public string TelemetryPath    => Resolve(Get("insanity_telemetry_path",
         Path.Combine(LogsRoot, "insanity", "{date}_{session}.jsonl")));
 
+    /// <summary>
+    /// FleetManager target — number of fake-clients held resident on the
+    /// server. Default 8, clamped 4..16. Edit insanity.cfg + reload plugin
+    /// for hot change. (v0.6.0+)
+    /// </summary>
+    public int    FleetSize        => Math.Clamp(GetInt("insanity_fleet_size", 8), 4, 16);
+
+    /// <summary>
+    /// Reveal Stage 2 trigger thresholds. Stage 2 fires when
+    /// `min(stage2_time_seconds, stage2_kills)` is reached. Default 45s
+    /// kills=ceil(fleet_size/2) — `kills` value -1 means "auto" (compute
+    /// from FleetSize at runtime). (v0.6.0+)
+    /// </summary>
+    public int    Stage2TimeSeconds => Math.Max(1, GetInt("insanity_reveal_stage2_time", 45));
+    public int    Stage2Kills       => GetInt("insanity_reveal_stage2_kills", -1);
+
+    /// <summary>
+    /// On Stage 3 cleanup, issue `mp_restartgame 1` to revive killed
+    /// humans so the next `!reveal` has live targets. Default true
+    /// (re-runnable spec). (v0.6.0+)
+    /// </summary>
+    public bool   RevealAutoRestart => GetInt("insanity_reveal_auto_restart", 1) != 0;
+
     private string Get(string k, string fallback)
         => _kv.TryGetValue(k, out var v) && v.Length > 0 ? v : fallback;
 
