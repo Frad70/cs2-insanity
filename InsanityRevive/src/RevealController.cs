@@ -5,6 +5,7 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Memory;
+using CounterStrikeSharp.API.Modules.UserMessages;
 using CounterStrikeSharp.API.Modules.Utils;
 
 namespace InsanityRevive;
@@ -118,15 +119,25 @@ public sealed class RevealController
             return;
         }
 
-        // ALL bots spam "1" at t=0,1,2,3,4 sec — bursts of fleet_size
-        // chat lines per second. Flood-the-chat effect amplifies the
-        // "something is wrong" feel of Stage 0.
-        for (int i = 0; i < 5; i++)
+        // Each bot fires 5 "1" lines with INDEPENDENT random delay
+        // 0.2-0.5 sec between consecutive messages. Mixes 8 bots over
+        // ~5-10 second total span depending on rolled delays — no
+        // synchronized burst, looks like jittery real human typing.
+        // Each message goes through SayAsBot which uses UserMessage
+        // SayText2 to broadcast as if the bot itself typed it.
+        foreach (var fc in _mgr.All)
         {
-            int delaySec = i;
-            Server.RunOnTick(Server.TickCount + delaySec * 64, () => {
-                foreach (var fc in _mgr.All) SayAsBot(fc, "1");
-            });
+            var capturedFc = fc;
+            int cumulativeTicks = 0;
+            for (int j = 0; j < 5; j++)
+            {
+                int delayTicks = cumulativeTicks;
+                Server.RunOnTick(Server.TickCount + delayTicks,
+                    () => SayAsBot(capturedFc, "1"));
+                // Roll next delay 0.2-0.5 sec uniform.
+                double sec = 0.2 + _rng.NextDouble() * 0.3;
+                cumulativeTicks += (int)(sec * 64);
+            }
         }
 
         // Sync jump impulse DROPPED in v0.6.0-beta. m_vecAbsVelocity is
@@ -224,14 +235,14 @@ public sealed class RevealController
 
     /// <summary>
     /// Distance (Hammer Units) from human centroid where the bot
-    /// cluster materializes. 300 HU ≈ 5m world space → ~1.5 sec for a
-    /// speed-boosted (×1.4) bot to close the gap with knife rush.
-    /// Gives the human reaction window (turn, see swarm coming, run /
-    /// shoot back) before the slaughter starts. Tuned per friend
-    /// playtest 2026-05-02; if too easy, drop to 200 HU; too hard,
-    /// raise to 500 HU.
+    /// cluster materializes. v0.6.0.3 had 300 HU (~5m world); friend
+    /// playtest reported "way too far" — bots wandered for too long
+    /// before reaching, lost the surprise. v0.6.0.4 cut to 80 HU
+    /// (~1.3m), giving 0.5-1 sec to react. Knife-only design assumes
+    /// the human can shoot back before contact; if bots pile too fast
+    /// raise to 100-150 HU.
     /// </summary>
-    private const float SwarmOffsetDistance = 300f;
+    private const float SwarmOffsetDistance = 80f;
 
     private void DeploySwarmAndKnifeRush()
     {
@@ -505,23 +516,34 @@ public sealed class RevealController
             return;
         }
 
-        // Weapon-lock guard (advisor flag): if a knife-rush bot has
-        // picked up a dropped gun, strip and re-give knife.
+        // Continuous knife-only enforcement on ALL living bots — not
+        // gated by _combatState membership. Catches:
+        //  - bots whose ApplyKnifeRush hasn't run yet (5-sec swarm-deploy
+        //    window after mp_restartgame, where defaults could otherwise
+        //    show pistols on screen)
+        //  - bots that respawned mid-stage and got default loadout
+        //  - bots that picked up a dropped weapon from an earlier kill
+        // Cost is fleet_size × 64 Hz reads/writes — trivial.
         foreach (var fc in _mgr.All)
         {
-            if (!_combatState.TryGetValue(fc.Slot, out var cs)) continue;
-            if (cs.StageWhenSet != RevealStage.Stage1) continue;
             try {
                 var c = Utilities.GetPlayerFromSlot(fc.Slot);
                 if (c == null || !c.IsValid) continue;
-                var active = c.PlayerPawn?.Value?.WeaponServices?.ActiveWeapon?.Value;
-                if (active == null) continue;
+                var pawn = c.PlayerPawn?.Value;
+                if (pawn == null || !pawn.IsValid) continue;
+                if (pawn.LifeState != 0) continue;  // dead — wait for next round
+
+                var active = pawn.WeaponServices?.ActiveWeapon?.Value;
+                if (active == null) {
+                    c.GiveNamedItem("weapon_knife");
+                    continue;
+                }
                 if (active.DesignerName != "weapon_knife")
                 {
                     StripAllWeapons(c);
                     c.GiveNamedItem("weapon_knife");
                 }
-            } catch { }
+            } catch (Exception ex) { Log.Debug($"TickStage1 enforce slot={fc.Slot}: {ex.Message}"); }
         }
     }
 
@@ -606,17 +628,45 @@ public sealed class RevealController
     }
 
     /// <summary>
-    /// Print a chat line that LOOKS like it came from the bot.
-    /// MVP implementation: server-prefixed message formatted with the
-    /// bot name + "1". UserMessage SayText2 broadcast for fully-faked
-    /// chat is a follow-up; works well enough for v0.6.0-beta.
+    /// Broadcast a chat line that appears as if the bot itself typed it
+    /// (real chat — team-color name + message, NOT server-prefixed).
+    /// Uses the SayText2 user message protobuf with the bot's controller
+    /// entity index as sender, so receiving clients render it identically
+    /// to a human player saying the line.
+    ///
+    /// Falls back to <see cref="Server.PrintToChatAll"/> if UserMessage
+    /// construction fails (proto field name drift across CSSharp versions
+    /// is a known risk).
     /// </summary>
     private static void SayAsBot(FakeClient fc, string text)
     {
+        CCSPlayerController? c = null;
+        try { c = Utilities.GetPlayerFromSlot(fc.Slot); } catch { }
+        if (c == null || !c.IsValid) return;
+
         try {
-            // Format mimics in-game chat: " bot_name : text"
-            // The leading space is what CSSharp PrintToChatAll outputs.
+            var um = UserMessage.FromPartialName("CMsgSayText2");
+            // Most CS2 chat plugins target all connected players for
+            // global chat. Recipients API exposes AddAllPlayers().
+            um.Recipients.AddAllPlayers();
+            um.SetInt("entityindex", (int)c.Index);
+            um.SetBool("chat", true);
+            // messagename = format string. CS2's Cstrike_Chat_All uses
+            // \x01 reset color, \x09 team color, etc. Inline format:
+            // "{name} :  {text}" with name colored to bot's team.
+            um.SetString("messagename",
+                $"\x01\x09{fc.Name}\x01 :  {text}");
+            um.SetString("param1", "");
+            um.SetString("param2", "");
+            um.SetString("param3", "");
+            um.SetString("param4", "");
+            um.Send();
+            return;
+        } catch (Exception ex) {
+            Log.Debug($"SayAsBot UserMessage: {ex.Message}; falling back to PrintToChatAll");
+        }
+        try {
             Server.PrintToChatAll($" {fc.Name}{ChatColors.Default} : {text}");
-        } catch (Exception ex) { Log.Debug($"SayAsBot: {ex.Message}"); }
+        } catch { }
     }
 }
