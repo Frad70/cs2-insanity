@@ -78,6 +78,17 @@ public sealed class RevealController
     private readonly Dictionary<int, int> _botPrevTeams = new();
 
     /// <summary>
+    /// Slot → desired team during reveal. Populated at FlipTeamsWithCap;
+    /// TickStage1 + TickStage2 re-issue SwitchTeam if a bot drifted off
+    /// (engine queue dropped the call, respawn re-aligned to old team,
+    /// etc.). Cleared at CleanupReveal. Without this, ~2 of 8 bots stay
+    /// on the wrong team after Stage 1 entry (v0.6.0.8 playtest evidence:
+    /// 2 bots stuck on T with the human, materializing as a "mummy" at
+    /// T-spawn because mp_solid_teammates=0 lets them clip).
+    /// </summary>
+    private readonly Dictionary<int, int> _botTargetTeams = new();
+
+    /// <summary>
     /// CS2 competitive 5v5 team cap. Per-team max, including humans.
     /// Hardcoded for v0.6.0.5 — if `+game_alias` ever changes from
     /// competitive to deathmatch/etc, revisit. Bots beyond this cap
@@ -313,17 +324,19 @@ public sealed class RevealController
         int sentToTarget = 0;
         int sentToSpec = 0;
         int verifyMismatch = 0;
+        _botTargetTeams.Clear();
         foreach (var fc in _mgr.All) {
             try {
                 var c = Utilities.GetPlayerFromSlot(fc.Slot);
                 if (c == null || !c.IsValid) continue;
 
                 int target = sentToTarget < availableSlots ? botTeam : (int)CsTeam.Spectator;
+                _botTargetTeams[fc.Slot] = target;  // remember for tick-level enforcement
                 c.SwitchTeam((CsTeam)target);
 
-                // Verify is LOG-ONLY now — no fallback write. If SwitchTeam
-                // is queue-based and didn't apply yet, c.TeamNum may not
-                // reflect the new value for a tick. We don't try to force.
+                // Verify is LOG-ONLY here — no fallback write. SwitchTeam
+                // is queue-based; immediate read may not reflect new value.
+                // TickStage1's enforce-team loop catches any drift.
                 if ((int)c.TeamNum != target) verifyMismatch++;
 
                 if (target == botTeam) sentToTarget++;
@@ -331,8 +344,29 @@ public sealed class RevealController
             } catch (Exception ex) { Log.Debug($"FlipTeams slot={fc.Slot}: {ex.Message}"); }
         }
         Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {sentToSpec} → spectator, " +
-                 $"{verifyMismatch} immediate-verify-mismatch (may resolve next tick) " +
+                 $"{verifyMismatch} immediate-verify-mismatch (will be re-attempted in TickStage1) " +
                  $"(cap={TeamCap}, humans on target={humansOnTargetTeam})");
+    }
+
+    /// <summary>
+    /// Re-issue SwitchTeam for any bot whose current TeamNum doesn't
+    /// match its desired-team in <see cref="_botTargetTeams"/>. Catches:
+    /// (a) v0.6.0.8 playtest failure where 2 of 8 bots stayed on the
+    ///     wrong team, (b) bots that respawn with team-rebalance reset.
+    /// Cheap (8 reads + at most 8 writes per call). Called from
+    /// TickStage1 (1 Hz) AND TickStage2.
+    /// </summary>
+    private void EnforceTeamMembership()
+    {
+        if (_botTargetTeams.Count == 0) return;
+        foreach (var (slot, target) in _botTargetTeams) {
+            try {
+                var c = Utilities.GetPlayerFromSlot(slot);
+                if (c == null || !c.IsValid) continue;
+                if ((int)c.TeamNum == target) continue;
+                c.SwitchTeam((CsTeam)target);
+            } catch { }
+        }
     }
 
     /// <summary>
@@ -454,10 +488,32 @@ public sealed class RevealController
             StripAllWeapons(c);
             c.GiveNamedItem("weapon_knife");
 
-            // Speed boost via dynamic schema setter.
+            // Speed boost — v0.6.0.9: 1.4 → 2.0. Playtest evidence:
+            // 1.4× was easy to outrun with pistol fire, user wiped 6 bots
+            // in 3 sec. 2.0× makes 80 HU close gap in ~0.4s, harder to
+            // pre-fire all of them. Tunable; if "too easy" persists, raise
+            // to 2.5 or shorten SwarmOffsetDistance.
             Schema.SetSchemaValue<float>(pawn.Handle, "CCSPlayerPawn",
-                "m_flVelocityModifier", 1.4f);
+                "m_flVelocityModifier", 2.0f);
             Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_flVelocityModifier");
+
+            // Armor + helmet via direct schema. With 100 hp + 100 armor +
+            // helmet, pistol body shots drop to ~10 dmg per hit (instead
+            // of 26-30 unarmored), and headshots take 2 hits (helmet
+            // absorbs the first). Knife rush feels much more dangerous.
+            // Both fields are on CCSPlayerPawn — proven networked path
+            // (CCSFixes plugin uses identical writes). NOT same-class as
+            // m_iTeamNum / m_angEyeAngles (those are server-state-only
+            // and crash on SetStateChanged); ArmorValue + bHasHelmet are
+            // properly networked.
+            try {
+                Schema.SetSchemaValue<int>(pawn.Handle, "CCSPlayerPawn",
+                    "m_ArmorValue", 100);
+                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_ArmorValue");
+                Schema.SetSchemaValue<bool>(pawn.Handle, "CCSPlayerPawn",
+                    "m_bHasHelmet", true);
+                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_bHasHelmet");
+            } catch (Exception ex) { Log.Debug($"armor write slot={fc.Slot}: {ex.Message}"); }
 
             _combatState[fc.Slot] = new BotCombatState {
                 ForcedWeapon = "weapon_knife", StageWhenSet = RevealStage.Stage1 };
@@ -574,6 +630,7 @@ public sealed class RevealController
                 } catch (Exception ex) { Log.Debug($"Restore team slot={slot}: {ex.Message}"); }
             }
             _botPrevTeams.Clear();
+            _botTargetTeams.Clear();  // stop tick-level enforcement
 
             foreach (var fc in _mgr.All) RestoreNormalLoadout(fc);
             _combatState.Clear();
@@ -641,13 +698,12 @@ public sealed class RevealController
         // CRITICAL ORDERING (v0.6.0.6 fix): knife enforcement runs FIRST,
         // BEFORE any time-based gates. v0.6.0.5 had the 30s min-duration
         // gate as an early-return at the top, which silently disabled
-        // knife enforcement during the first 30 seconds of Stage 1 —
-        // bots that respawned mid-Stage-1 (after a death-respawn cycle
-        // triggered by mp_restartgame or game logic) kept their default
-        // pistol+knife loadout, never got stripped. User observed "half
-        // bots with knives, half with pistols". This fixes it: enforce
-        // every tick regardless of elapsed time.
+        // knife enforcement during the first 30 seconds of Stage 1.
         EnforceKnifeOnAll();
+        // v0.6.0.9 fix: re-issue SwitchTeam for any bot that drifted off
+        // its assigned team (queue race, respawn rebalance). Without this,
+        // 2 of 8 bots stay on T with the human → "mummy" stack at T-spawn.
+        EnforceTeamMembership();
 
         // Stage 2 trigger logic (v0.6.0.5 user-spec):
         //   - HARD MINIMUM Stage1MinDurationSec.
@@ -717,6 +773,10 @@ public sealed class RevealController
 
     private void TickStage2()
     {
+        // Re-enforce team membership (cheap, prevents drift if Stage 2's
+        // mp_restartgame pulled any bots back to their pre-reveal team).
+        EnforceTeamMembership();
+
         // ONLY a timeout check — no per-tick weapon overrides. Earlier
         // versions wrote Clip1/AccuracyPenalty per tick, which raced
         // with mp_restartgame's respawn machinery and crashed the server
