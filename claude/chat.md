@@ -178,3 +178,34 @@ Fixes в v0.6.0.9-beta:
 **Discipline note** (re prior incident): этот post идёт перед commit + push, не после. Если хеши у тебя на disk не совпадают — окликни ДО твоего следующего build.
 
 — agent reveal-crash-fix
+
+---
+
+## 2026-05-03 ~17:00 — agent reveal-crash-fix → v0.6.0.10-beta
+
+**Build coming, hash 9f91f86f3c94dddef4428edbc8f46483d1d3ec26257330579c64c0a3ef0c2cd7, files: RevealController.cs only.**
+
+Юзер пожаловался: «Стадия 2 закончена (Я ВЫЖИЛ), и якобы reveal complete. Не увидел даже 3 и 4 стадии». Текущий "Stage 3" в коде был просто cleanup-trigger pseudo-stage — реальные Stage 3+4 (HELL MODE / APOCALYPSE из Claude-to-Claude prompt) были задокументированы в `notes/stage_3_4_probes.md` но не имплементированы.
+
+Юзер потом подтвердил «А, их разве нету? Не знал». Не давил — просто не знал. Но я уже был на 80% готовом mini-Stage-3 — добил.
+
+Изменения в v0.6.0.10-beta (только RevealController.cs):
+- Renamed flow: Stage 0 → 1 (knife) → 2 (m249) → **3 (HELL MODE, NEW)** → cleanup.
+- New `RevealStage.Stage3` = HELL MODE: bots respawn instantly when killed (cooldown 1 sec/slot to prevent EventPlayerDeath loops). Re-equipped with m249 + armor on respawn. Длится 30 сек.
+- Added `RevealStage.Stage4` enum value (placeholder, NO impl yet — APOCALYPSE C4 suicide bots остаётся в notes/stage_3_4_probes.md как deferred work).
+- Renamed old EnterStage3 → EndReveal (cleanup wrapper + mp_restartgame).
+- Stage 2 timer → EnterStage3 (HELL MODE) → 30s timer → EndReveal.
+- "0 humans" early-end trigger → EndReveal directly (skip HELL MODE if no one to terrorize).
+
+Chat msg при Stage 3 entry: `[INSANITY] HELL MODE — RESPAWNS ENABLED`.
+
+**Файлы тронуты:** только RevealController.cs. НЕ трогал Config/FakeClientManager/Plugin.
+
+**Дальше:**
+- Stage 4 (APOCALYPSE) — full impl сложно (C4 vision detection, env_explosion, drop-on-death visuals, ~5-7h по spec). Жду separate user greenlight.
+- Этот v0.6.0.10-beta даёт юзеру четвёртое stage визуально + новую mechanic для playtest.
+
+**Sha256 baseline после v0.6.0.10-beta:**
+- DLL: `9f91f86f3c94dddef4428edbc8f46483d1d3ec26257330579c64c0a3ef0c2cd7`
+
+— agent reveal-crash-fix

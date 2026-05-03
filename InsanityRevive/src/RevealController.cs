@@ -44,7 +44,22 @@ namespace InsanityRevive;
 /// </summary>
 public sealed class RevealController
 {
-    public enum RevealStage { Idle, Stage0, Stage1, Stage2, Stage3 }
+    public enum RevealStage { Idle, Stage0, Stage1, Stage2, Stage3, Stage4 }
+
+    /// <summary>
+    /// Stage 3 (HELL MODE) max duration before auto-cleanup. Bots respawn
+    /// instantly when killed during this stage — without a cap, and with
+    /// no humans to kill them, hell mode would loop forever.
+    /// </summary>
+    private const int Stage3MaxDurationSec = 30;
+
+    /// <summary>
+    /// Cooldown between same-slot respawns in HELL MODE. Without it,
+    /// EventPlayerDeath could fire repeatedly on a single death and
+    /// schedule N respawns. 1 sec is plenty.
+    /// </summary>
+    private const int Stage3RespawnCooldownTicks = 64;
+    private readonly Dictionary<int, int> _lastRespawnTick = new();
 
     public RevealStage Stage { get; private set; } = RevealStage.Idle;
 
@@ -576,14 +591,50 @@ public sealed class RevealController
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Stage 3 — cleanup
+    // Stage 3 — HELL MODE (v0.6.0.10-beta, was previously cleanup-trigger)
     // ──────────────────────────────────────────────────────────────────
+    //
+    // User playtest after v0.6.0.9 reported: "Стадия 2 закончена (Я ВЫЖИЛ),
+    // и якобы reveal complete. Не увидел даже 3 и 4 стадии." The original
+    // Stage 3 was just a cleanup-transition pseudo-stage. Renamed flow:
+    //   Stage 2 timer/kills → Stage 3 (HELL MODE) → 30s timer → EndReveal
+    //
+    // HELL MODE behavior: bots that die get instant respawn (cooldown 1
+    // sec/slot to prevent EventPlayerDeath loops), re-equipped with m249
+    // and armor on respawn. Human can keep killing them but can never
+    // deplete the fleet. After 30s the hell ends and CleanupReveal fires.
+    //
+    // Stage 4 (APOCALYPSE — C4 suicide bots) is a separate auto-chain
+    // after Stage 3 — see EnterStage4 below. NOT yet implemented in this
+    // version; placeholder enum value reserves the slot.
     private void EnterStage3()
     {
         Stage = RevealStage.Stage3;
-        var stageDurationTicks = Server.TickCount - _stageStartTick;
+        _stageStartTick = Server.TickCount;
+        _lastRespawnTick.Clear();
         _mgr.Telemetry.Write("reveal_stage_enter", new Dictionary<string, object?> {
-            { "stage", "Stage3" }, { "totalKills", _botsKilledThisReveal } });
+            { "stage", "Stage3" }, { "name", "HELL_MODE" },
+            { "killsBeforeEntry", _botsKilledThisReveal } });
+
+        Server.PrintToChatAll($" {ChatColors.DarkRed}[INSANITY] HELL MODE — RESPAWNS ENABLED");
+        // Bots already on m249 from Stage 2; armor stays from Stage 1.
+        // Tick3 will reapply both on respawn via re-call to ApplyM249Rush.
+    }
+
+    private void TickStage3()
+    {
+        EnforceTeamMembership();
+
+        var elapsedSec = (Server.TickCount - _stageStartTick) / 64;
+        if (elapsedSec >= Stage3MaxDurationSec) {
+            EndReveal();
+        }
+    }
+
+    private void EndReveal()
+    {
+        _mgr.Telemetry.Write("reveal_stage_enter", new Dictionary<string, object?> {
+            { "stage", "End" }, { "totalKills", _botsKilledThisReveal } });
 
         Server.PrintToChatAll($" {ChatColors.DarkRed}[INSANITY] reveal complete");
         CleanupReveal();
@@ -673,20 +724,24 @@ public sealed class RevealController
         {
             case RevealStage.Stage1: TickStage1(); break;
             case RevealStage.Stage2: TickStage2(); break;
+            case RevealStage.Stage3: TickStage3(); break;
         }
 
-        // Stage 3 trigger: 0 living humans, sustained for ≥1 sec.
-        // Dampening required because mp_restartgame at Stage 1/2 entry
-        // briefly puts ALL pawns (including humans) in transient
-        // respawn state where LifeState != 0 → LivingHumansCount() == 0
-        // for a few ticks. Without dampening, Stage 3 fires immediately
-        // after mp_restartgame even though the human is alive.
-        if (Stage == RevealStage.Stage1 || Stage == RevealStage.Stage2)
+        // Early-end trigger: 0 living humans sustained for ≥1 sec.
+        // Dampening because mp_restartgame at Stage 1/2 entry briefly
+        // puts ALL pawns (including humans) in transient respawn state
+        // (LifeState != 0 → LivingHumansCount() == 0 for a few ticks).
+        //
+        // Was: "0 humans → EnterStage3 (which was cleanup)".
+        // Now: "0 humans → EndReveal directly". Skipping HELL MODE makes
+        // sense because there's no one to terrorize. HELL MODE Stage 3
+        // is reached normally via Stage 2's natural timer transition.
+        if (Stage == RevealStage.Stage1 || Stage == RevealStage.Stage2 || Stage == RevealStage.Stage3)
         {
             if (LivingHumansCount() == 0 && _humansAtStart > 0) {
                 _zeroHumansTickCount++;
                 if (_zeroHumansTickCount >= ZeroHumansDampenTicks)
-                    EnterStage3();
+                    EndReveal();
             } else {
                 _zeroHumansTickCount = 0;
             }
@@ -806,6 +861,29 @@ public sealed class RevealController
         if (actuallyManagedBot)
         {
             _botsKilledThisReveal++;
+            // HELL MODE: respawn dead bots and re-equip. Cooldown 1 sec
+            // per slot prevents infinite-loop if EventPlayerDeath fires
+            // multiple times for the same death.
+            if (Stage == RevealStage.Stage3)
+            {
+                int now = Server.TickCount;
+                if (_lastRespawnTick.TryGetValue(victimSlot, out var last) &&
+                    now - last < Stage3RespawnCooldownTicks) return;
+                _lastRespawnTick[victimSlot] = now;
+                // Schedule respawn ~0.5s after death (camera + ragdoll
+                // settles), then re-apply m249 + armor 1 tick later.
+                Server.RunOnTick(now + 32, () => {
+                    try {
+                        var c = Utilities.GetPlayerFromSlot(victimSlot);
+                        if (c == null || !c.IsValid) return;
+                        c.Respawn();
+                        Server.RunOnTick(Server.TickCount + 4, () => {
+                            var fc = _mgr.FindBySlot(victimSlot);
+                            if (fc != null) ApplyM249Rush(fc);
+                        });
+                    } catch (Exception ex) { Log.Debug($"hell respawn slot={victimSlot}: {ex.Message}"); }
+                });
+            }
             return;
         }
 
