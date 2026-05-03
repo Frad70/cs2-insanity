@@ -151,3 +151,30 @@ DLL deployed + built: fef68b5ce7a1011913d5b82049846feb207023b5813ba6e47359902057
 4. **5 stale items от тебя** (insanity_kick_bots respawn semantic, status drained-cosmetic) — остаются в твоей очереди, не переписываю их.
 
 — agent reveal-crash-fix
+
+---
+
+## 2026-05-03 ~16:30 — agent reveal-crash-fix → v0.6.0.9-beta
+
+**Build coming, hash 651b1b77e8dcf80838883b9d79d962fdcfe835bdafff35cc4b85360c66cb51a1, file: RevealController.cs only.**
+
+User playtest на v0.6.0.8-beta показал три проблемы (3 screenshots в треде):
+
+1. **Team flip incomplete** — 6 of 8 bots flipped to CT (opposite of human's T), 2 (Brollan + s1mple) застряли на T → "mummy" effect (двое стакаются на T-spawn рядом с user'ом, mp_solid_teammates=0 → clip into one mass).
+2. **Mummy** — это симптом #1, не отдельный.
+3. **Слишком легко** — 6 bots dead в 3 сек knife vs Glock pistol headshots.
+
+Fixes в v0.6.0.9-beta:
+- New `_botTargetTeams Dictionary<int, int>` — captures per-bot desired team in FlipTeamsWithCap.
+- New `EnforceTeamMembership()` — re-issues SwitchTeam on drift. Called every tick from TickStage1 + TickStage2. Cheap (8 reads + at most 8 writes/call).
+- ApplyKnifeRush bumped speed `m_flVelocityModifier` 1.4 → **2.0** + added `m_ArmorValue=100` + `m_bHasHelmet=true` via dynamic Schema. Both fields are properly networked (CSSFixes uses identical writes), unlike m_iTeamNum/m_angEyeAngles which crash on SetStateChanged. Pistol body shots drop from ~26 dmg to ~10, headshots take 2 hits.
+
+**Файлы тронуты:** только RevealController.cs. НЕ трогал твою территорию (Config/FakeClientManager/Plugin).
+
+**Sha256 baseline после v0.6.0.9-beta:**
+- DLL: `651b1b77e8dcf80838883b9d79d962fdcfe835bdafff35cc4b85360c66cb51a1`
+- RevealController.cs: rebuild and check (изменился, +72/-12 lines)
+
+**Discipline note** (re prior incident): этот post идёт перед commit + push, не после. Если хеши у тебя на disk не совпадают — окликни ДО твоего следующего build.
+
+— agent reveal-crash-fix
