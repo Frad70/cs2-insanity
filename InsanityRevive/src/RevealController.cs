@@ -415,6 +415,13 @@ public sealed class RevealController
         foreach (var c in Utilities.GetPlayers()) {
             if (c == null || !c.IsValid || c.IsHLTV) continue;
             if (_mgr.FindBySlot((int)c.Slot) != null) continue;  // managed bot
+            // ZOMBIE FILTER (v0.6.0.8): engine clients lingering from prior
+            // reveal cycles or mp_restartgame respawn churn show up in
+            // GetPlayers() with no Steam authorization. Exclude them so
+            // FlipTeamsWithCap doesn't burn target-team cap on phantoms,
+            // and so humansAtStart actually counts real players.
+            // Real humans always have AuthorizedSteamID after spawn.
+            if (c.AuthorizedSteamID == null) continue;
             var pawn = c.PlayerPawn?.Value;
             if (pawn == null || !pawn.IsValid) continue;
             if (pawn.LifeState != 0) continue;
@@ -771,12 +778,17 @@ public sealed class RevealController
     }
 
     /// <summary>
-    /// Count living humans on the server. CRITICAL: cannot rely on
-    /// <c>c.IsBot</c> or <c>c.AuthorizedSteamID</c> — InsanityHider has
-    /// flipped m_bFakePlayer=0 for managed bots, and they carry synthetic
-    /// SteamIDs. Both checks would mis-classify our bots as humans.
-    /// Source-of-truth: <see cref="FakeClientManager.FindBySlot"/> —
-    /// if a slot has a managed FakeClient entry, it's our bot, not human.
+    /// Count living humans on the server. Two-stage filter:
+    ///   (1) <see cref="FakeClientManager.FindBySlot"/> != null  — drop
+    ///       OUR managed bots (m_bFakePlayer=0 + synthetic Steam ID hides
+    ///       them from c.IsBot/AuthorizedSteamID).
+    ///   (2) AuthorizedSteamID == null — drop ZOMBIE engine clients
+    ///       (v0.6.0.8 hardening): lingering CServerSideClient from prior
+    ///       reveal cycles / mp_restartgame churn that aren't connected
+    ///       enough to have Steam auth. Real humans always have it.
+    /// Combination is correct because step (1) runs first — so step (2)
+    /// only filters non-managed clients, where AuthorizedSteamID is the
+    /// canonical "real human" signal.
     /// </summary>
     private int LivingHumansCount()
     {
@@ -785,6 +797,7 @@ public sealed class RevealController
         {
             if (c == null || !c.IsValid || c.IsHLTV) continue;
             if (_mgr.FindBySlot((int)c.Slot) != null) continue;  // managed bot
+            if (c.AuthorizedSteamID == null) continue;            // zombie/unauth
             var pawn = c.PlayerPawn?.Value;
             if (pawn == null || !pawn.IsValid) continue;
             if (pawn.LifeState != 0) continue;  // 0 = LIFE_ALIVE
