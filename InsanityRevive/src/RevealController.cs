@@ -162,6 +162,24 @@ public sealed class RevealController
             CleanupReveal();
         }
 
+        // v0.6.0.11 fix: if fleet is drained (override=0 from bot_kick),
+        // auto-restore + schedule reveal to retry in 10 sec. Without this,
+        // user does `bot_kick` then `!reveal` and reveal silently aborts
+        // because Stage 0 sees 0 bots. Confusing UX.
+        if (_mgr.All.Count == 0 && _mgr.PendingPersonaCount == 0)
+        {
+            Log.Info("Reveal: fleet empty — auto-restoring (clearing override) and retrying in 10s");
+            _mgr.Config.SetFleetSizeOverride(null);
+            Server.PrintToChatAll($" {ChatColors.DarkRed}[INSANITY] fleet empty — restoring, retrying reveal in 10s");
+            Server.RunOnTick(Server.TickCount + 64 * 10, () => {
+                if (Stage == RevealStage.Idle && _mgr.All.Count > 0)
+                    EnterStage0();
+                else
+                    Log.Warn($"Reveal retry: stage={Stage} bots={_mgr.All.Count} — abort");
+            });
+            return;
+        }
+
         EnterStage0();
     }
 
@@ -337,7 +355,7 @@ public sealed class RevealController
         int humansOnTargetTeam = humans.Count(h => (int)h.TeamNum == botTeam);
         int availableSlots = Math.Max(0, TeamCap - humansOnTargetTeam);
         int sentToTarget = 0;
-        int sentToSpec = 0;
+        int leftOnPrev = 0;
         int verifyMismatch = 0;
         _botTargetTeams.Clear();
         foreach (var fc in _mgr.All) {
@@ -345,22 +363,30 @@ public sealed class RevealController
                 var c = Utilities.GetPlayerFromSlot(fc.Slot);
                 if (c == null || !c.IsValid) continue;
 
-                int target = sentToTarget < availableSlots ? botTeam : (int)CsTeam.Spectator;
-                _botTargetTeams[fc.Slot] = target;  // remember for tick-level enforcement
-                c.SwitchTeam((CsTeam)target);
-
-                // Verify is LOG-ONLY here — no fallback write. SwitchTeam
-                // is queue-based; immediate read may not reflect new value.
-                // TickStage1's enforce-team loop catches any drift.
-                if ((int)c.TeamNum != target) verifyMismatch++;
-
-                if (target == botTeam) sentToTarget++;
-                else sentToSpec++;
+                if (sentToTarget < availableSlots)
+                {
+                    // Within cap — flip to opposite team.
+                    _botTargetTeams[fc.Slot] = botTeam;
+                    c.SwitchTeam((CsTeam)botTeam);
+                    if ((int)c.TeamNum != botTeam) verifyMismatch++;
+                    sentToTarget++;
+                }
+                else
+                {
+                    // Cap hit — LEAVE bot on its prior team. v0.6.0.11
+                    // fix: previous code did SwitchTeam(Spectator) which
+                    // engine rejected with "CCSPlayerPawnBase::SwitchTeam(1)
+                    // - invalid team index" log spam (not crashy but
+                    // floods server.log). Side effect: cap-overflow bots
+                    // remain on user's team and may not attack — known
+                    // limitation, accept until cap-bypass mechanism found.
+                    leftOnPrev++;
+                }
             } catch (Exception ex) { Log.Debug($"FlipTeams slot={fc.Slot}: {ex.Message}"); }
         }
-        Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {sentToSpec} → spectator, " +
-                 $"{verifyMismatch} immediate-verify-mismatch (will be re-attempted in TickStage1) " +
-                 $"(cap={TeamCap}, humans on target={humansOnTargetTeam})");
+        Log.Info($"Stage 1 team flip: {sentToTarget} → team {botTeam}, {leftOnPrev} left on prev " +
+                 $"(cap={TeamCap}, humans on target={humansOnTargetTeam}, " +
+                 $"{verifyMismatch} immediate-verify-mismatch — TickStage1 will re-attempt)");
     }
 
     /// <summary>
@@ -512,23 +538,19 @@ public sealed class RevealController
                 "m_flVelocityModifier", 2.0f);
             Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_flVelocityModifier");
 
-            // Armor + helmet via direct schema. With 100 hp + 100 armor +
-            // helmet, pistol body shots drop to ~10 dmg per hit (instead
-            // of 26-30 unarmored), and headshots take 2 hits (helmet
-            // absorbs the first). Knife rush feels much more dangerous.
-            // Both fields are on CCSPlayerPawn — proven networked path
-            // (CCSFixes plugin uses identical writes). NOT same-class as
-            // m_iTeamNum / m_angEyeAngles (those are server-state-only
-            // and crash on SetStateChanged); ArmorValue + bHasHelmet are
-            // properly networked.
-            try {
-                Schema.SetSchemaValue<int>(pawn.Handle, "CCSPlayerPawn",
-                    "m_ArmorValue", 100);
-                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_ArmorValue");
-                Schema.SetSchemaValue<bool>(pawn.Handle, "CCSPlayerPawn",
-                    "m_bHasHelmet", true);
-                Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_bHasHelmet");
-            } catch (Exception ex) { Log.Debug($"armor write slot={fc.Slot}: {ex.Message}"); }
+            // ARMOR REVERTED v0.6.0.11: my v0.6.0.9 attempt to write
+            // m_ArmorValue + m_bHasHelmet via Schema.SetSchemaValue +
+            // SetStateChanged CRASHED the server at 14:53:19 with the
+            // same patho as m_iTeamNum and m_angEyeAngles — CSSharp
+            // warned "Field CCSPlayerPawn:m_bHasHelmet is not networked,
+            // but SetStateChanged was called on it" and crashed on next
+            // tick. Despite the comment claim that CSSFixes uses identical
+            // writes, my exact path crashes here. Need different approach
+            // (typed pawn.ArmorValue setter? or via item give like
+            // "item_assaultsuit"?) — TODO for next iteration.
+            //
+            // For now: knife rush relies on speed boost (2.0) alone +
+            // 80 HU short distance to close gap before user fires.
 
             _combatState[fc.Slot] = new BotCombatState {
                 ForcedWeapon = "weapon_knife", StageWhenSet = RevealStage.Stage1 };
