@@ -209,3 +209,49 @@ Chat msg при Stage 3 entry: `[INSANITY] HELL MODE — RESPAWNS ENABLED`.
 - DLL: `9f91f86f3c94dddef4428edbc8f46483d1d3ec26257330579c64c0a3ef0c2cd7`
 
 — agent reveal-crash-fix
+
+---
+
+## 2026-05-03 ~17:55 — agent reveal-crash-fix → v0.6.0.11-beta
+
+**Build coming, hash 92a44ce560cbd1ae2664be57a38cb51ee7b1f977c1b1e045d3c4301cbd344a8a, file: RevealController.cs only.**
+
+**INCIDENT REPORT — v0.6.0.9 armor write crashed server.**
+
+Crash dump 14:53:19 после моего v0.6.0.9 deploy. Stack:
+```
+CCSPlayerPawnBase::SwitchTeam( 1 ) - invalid team index. (×N)  ← noisy log spam
+14:53:19 [WARN] Field CCSPlayerPawn:m_bHasHelmet is not networked, but
+                SetStateChanged was called on it. (×8)               ← crashed
+crash_20260503145319_17.dmp
+```
+
+То же patho что у `m_iTeamNum` (v0.6.0.6) и `m_angEyeAngles` (parallel agent's experimental build, ~vчера). My v0.6.0.9 утверждал «both fields are properly networked, CSSFixes uses identical writes» — это утверждение **неверно**. m_bHasHelmet is server-state-only → SetStateChanged crashes engine.
+
+**Резюме крашных полей (для нашего общего avoidance list):**
+- `m_iTeamNum` (CCSPlayerController) — НЕ networked, server-state. Crashes на SetStateChanged.
+- `m_angEyeAngles` (CCSPlayerPawnBase) — НЕ networked. Crashes.
+- `m_bHasHelmet` (CCSPlayerPawn) — НЕ networked. Crashes.
+- `m_ArmorValue` (CCSPlayerPawn) — uncertain status, removed defensively вместе с helmet.
+
+**Резюме безопасных полей (proven networked):**
+- `m_flVelocityModifier` (CCSPlayerPawn) — speed boost, used since v0.6.0.2 без проблем.
+- `m_iPing` (CCSPlayerController) — via `c.Ping = N` + SetStateChanged. Used since v0.5.0.
+- `m_iTeamNum` should NOT be SetStateChanged'ed; use `c.SwitchTeam(team)` instead — proper engine path.
+
+Изменения в v0.6.0.11-beta (только RevealController.cs):
+1. **REVERT m_ArmorValue + m_bHasHelmet writes** — removed entirely, no crash. Stage 1 lethality relies on speed 2.0 + close 80 HU spawn distance.
+2. **FIX SwitchTeam(Spectator) spam** — engine rejects team=1 для CCSPlayerPawnBase. Was: cap-overflow bots → SwitchTeam(Spectator) → log spam. Now: leave bots on prev team (acceptable trade-off — they may not attack, but no spam).
+3. **NEW auto-restore fleet on `!reveal`** — if fleet is drained (override=0 from `bot_kick`), Reveal.Start() now clears the override + schedules Stage 0 entry in 10 sec. Without this, user does `bot_kick` then `!reveal` → Stage 0 silently aborts because `bots.Count == 0`. Confusing UX. Now: chat msg `[INSANITY] fleet empty — restoring, retrying reveal in 10s`.
+
+**Файлы тронуты:** только RevealController.cs.
+
+**Ping issue (user reported "у всех пинг 0 без изменений"):**
+- `insanity_status` показывает реальные pings (21-79ms через PingDisplay.LastWrittenPing)
+- Если scoreboard (TAB) показывает 0 — это другой codepath (m_iPing через `c.Ping = uint`)
+- Не воспроизвёл локально, нужны более конкретные screenshots от юзера (TAB-scoreboard ping column)
+
+**Sha256 baseline:**
+- DLL: `92a44ce560cbd1ae2664be57a38cb51ee7b1f977c1b1e045d3c4301cbd344a8a`
+
+— agent reveal-crash-fix
