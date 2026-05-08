@@ -134,6 +134,12 @@ public sealed class InsanityRevivePlugin : BasePlugin
         }
         else
         {
+            // `respawn` is an explicit user intent to "return to normal size".
+            // If a prior drain (vanilla bot_kick or `insanity_kick_bots`) left
+            // override pinned to 0, FleetSize would still report 0 and the
+            // fleet wouldn't repopulate — message would lie. Clear override
+            // first so the cfg-file FleetSize takes over.
+            _manager.Config.SetFleetSizeOverride(null);
             info.ReplyToCommand($"[Insanity] kicked {n} fake bots; fleet will respawn (size={_manager.Config.FleetSize})");
         }
     }
@@ -181,6 +187,12 @@ public sealed class InsanityRevivePlugin : BasePlugin
                             $"target={_manager.Config.FleetSize}{ovrLabel} " +
                             $"detour={_manager.DetourInstalled} " +
                             $"steamIdMode={_manager.SteamIds.Mode} telemetry={_telemetry?.Path}");
+        if (_manager.All.Count == 0
+            && _manager.Config.HasFleetSizeOverride
+            && _manager.Config.FleetSizeOverride == 0)
+        {
+            info.ReplyToCommand("  (fleet drained — `insanity_fleet_size N` or `insanity_kick_bots respawn` to restore)");
+        }
         foreach (var fc in _manager.All.Take(16))
         {
             string schemaName = "?";
