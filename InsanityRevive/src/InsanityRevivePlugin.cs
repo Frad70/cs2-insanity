@@ -26,7 +26,7 @@ public sealed class InsanityRevivePlugin : BasePlugin
         Log.SetLevel(_config.LogLevel);
 
         _telemetry = new Telemetry(_config.TelemetryPath);
-        _manager = new FakeClientManager(_config, _telemetry);
+        _manager = new FakeClientManager(this, _config, _telemetry);
         _manager.OnLoad(Api.GetVersionString());
 
         // Without this, the server hibernates when no real players are

@@ -282,3 +282,28 @@ When `_manager.All.Count == 0 && Config.HasFleetSizeOverride && Config.FleetSize
 - DLL: `97f241356c4db3246f417a81982011904cacafa778be9f501042f2be9b108fa9`
 
 — agent autonomous-session-step1
+
+---
+
+## 2026-05-08 13:55 — agent autonomous-session-step2 (Opus 4.7 1M, xhigh effort)
+
+**Build coming, hash `25a6bfa366b247e04f9f40781cf33c698f068ecb9ea17688fb0497d7a103a70f`, files: BotDamagePatch.cs (rewrite), FakeClientManager.cs (ctor), InsanityRevivePlugin.cs (one-liner).**
+
+**v0.6.0.13-beta — port BotDamagePatch from deprecated TakeDamageOldFunc to Listeners.OnEntityTakeDamagePre.**
+
+The compiler-warning carrot: CSSharp 1.0.367 marked `VirtualFunctions.CBaseEntity_TakeDamageOldFunc` obsolete with the message "Use Listeners.OnEntityTakeDamagePre instead". `notes/stage_3_4_probes.md` Probe 4 also flags this — modern listener is the documented replacement.
+
+What changed:
+- `BotDamagePatch.cs` rewritten end-to-end. Now uses `_plugin.RegisterListener<Listeners.OnEntityTakeDamagePre>(...)` / `_plugin.RemoveListener<Listeners.OnEntityTakeDamagePre>(...)`. Filter behavior preserved (bot-vs-bot direct damage blocked, self-damage allowed) and EXTENDED with the inflictor-class filter from probe 4 design: `inferno` / `molotov_projectile` / `hegrenade_projectile` projectile damage to managed bots is `HookResult.Handled` (full cancel). This is the prerequisite for Stage 4 grenade rain (probe 2) — without it, the molotov/HE rain that is supposed to fry humans would mulch the swarm itself first.
+- `FakeClientManager` ctor now takes `BasePlugin plugin` first arg. Stored on a new `Plugin` property. Forwarded to `BotDamagePatch` ctor.
+- `InsanityRevivePlugin.Load`: call site updated to `new FakeClientManager(this, _config, _telemetry)`.
+- Still NOT auto-installed at plugin Load (semantics from v0.6.0.2 preserved). Stage 4 entry will call `Install()`, EndReveal will call `Uninstall()`. Step 5 wires that.
+
+Build: 0 warnings (the two CS0618 disappeared as expected). Smoke: hot-reloaded plugin in live server, `insanity_status` returns correctly, no exception during plugin Load. The "Assembly with same name is already loaded" line in server.log around the reload is a known CSSharp 1.0.367 race — first reload attempt errors, second succeeds within ~1s. Not introduced by this change.
+
+**Файлы тронуты:** `BotDamagePatch.cs`, `FakeClientManager.cs` (~5 строк), `InsanityRevivePlugin.cs` (~1 строка).
+
+**Sha256 baseline после v0.6.0.13-beta:**
+- DLL: `25a6bfa366b247e04f9f40781cf33c698f068ecb9ea17688fb0497d7a103a70f`
+
+— agent autonomous-session-step2

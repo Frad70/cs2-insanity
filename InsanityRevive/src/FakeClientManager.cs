@@ -121,8 +121,9 @@ public sealed class FakeClientManager : IDisposable
     public RevealController Reveal { get; private set; } = null!;
     public BotDamagePatch DamagePatch { get; private set; } = null!;
 
-    public FakeClientManager(Config cfg, Telemetry telemetry)
+    public FakeClientManager(BasePlugin plugin, Config cfg, Telemetry telemetry)
     {
+        Plugin = plugin;
         Config = cfg;
         Telemetry = telemetry;
         SteamIds = SteamIdProviderFactory.Create(cfg, telemetry.SessionId);
@@ -130,8 +131,12 @@ public sealed class FakeClientManager : IDisposable
         _registry = new PersonaRegistry();
         Fleet = new FleetManager(this);
         Reveal = new RevealController(this);
-        DamagePatch = new BotDamagePatch(this);
+        DamagePatch = new BotDamagePatch(plugin, this);
     }
+
+    /// <summary>The owning plugin instance — used by BotDamagePatch and any
+    /// future component that needs RegisterListener / RemoveListener.</summary>
+    public BasePlugin Plugin { get; }
 
     /// <summary>FakeClient lookup by slot — used by RevealController.</summary>
     public FakeClient? FindBySlot(int slot)
