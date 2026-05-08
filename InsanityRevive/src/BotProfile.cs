@@ -35,6 +35,32 @@ public enum BotLanguage { Russian, English, German, French, Spanish, Other }
 public enum Mood { Fresh, Warmed, Tired, Frustrated }
 
 /// <summary>
+/// How the bot manifests complacency — the visual signature of "не играет".
+/// Set at generation time from archetype; doesn't change at runtime.
+/// Future behaviour modules (movement, buy, utility) read this to pick
+/// flavor: showoff bots try no-scopes, lazy bots sit further back, passive
+/// bots disengage to weird angles. (Used as enum hint for now; behaviour
+/// modules don't exist yet.)
+/// </summary>
+public enum ComplacencyStyle { Lazy, Showoff, Passive }
+
+/// <summary>
+/// Round-end payload for <see cref="BotProfile.NotifyEvent(string,RoundEventArgs?)"/>.
+/// Caller computes team averages from observed stats so bots don't "know"
+/// each other's hidden SkillRating — see InsanityRevivePlugin's
+/// <c>EventRoundEnd</c> handler.
+/// </summary>
+public sealed class RoundEventArgs
+{
+    public bool   Win                 { get; init; }
+    public double OwnTeamAvgSkill     { get; init; }   // 0..100
+    public double EnemyTeamAvgSkill   { get; init; }   // 0..100
+    /// <summary>Optional bot's own contribution metric (kills/deaths
+    /// or normalized 0..1). Reserved for future use; not consumed yet.</summary>
+    public double OwnPerformance      { get; init; }
+}
+
+/// <summary>
 /// Per-archetype generation constraints. All fields are ranges or
 /// deterministic biases; the actual values get jittered inside the
 /// archetype's range so two SchoolRushers don't end up identical.
@@ -129,22 +155,40 @@ public sealed class BotProfile
     public int          Patience        { get; init; }
     public int          TeamPlayerBias  { get; init; }
 
+    public ComplacencyStyle ComplacencyStyle { get; init; }
     public DateTime SessionStartedAt { get; init; } = DateTime.UtcNow;
 
     // === Dynamic state ================================================
-    public Mood Mood        { get; private set; } = Mood.Fresh;
-    public int  Tilt        { get; private set; }   // 0..100
-    public int  WinStreak   { get; private set; }
-    public int  LossStreak  { get; private set; }
-    public int  RoundsPlayed{ get; private set; }
-    public int  Kills       { get; private set; }
-    public int  Deaths      { get; private set; }
+    public Mood  Mood             { get; private set; } = Mood.Fresh;
+    public int   Tilt             { get; private set; }   // 0..100
+    public float Complacency      { get; private set; }   // 0..100 — расслабон от лёгкого противника
+    public int   RoundsAtHighComp { get; private set; }   // consecutive rounds with comp ≥ 50
+    public int   WinStreak        { get; private set; }
+    public int   LossStreak       { get; private set; }
+    public int   RoundsPlayed     { get; private set; }
+    public int   Kills            { get; private set; }
+    public int   Deaths           { get; private set; }
 
-    // === Computed (read-only — clamp Mood/Tilt into base values) ======
+    // === Computed (read-only — clamp Mood/Tilt/Complacency into base values) ===
+    //
+    // Aim:    base × moodMult × (1 − tilt/200) × (1 − complacency/250)
+    //         At complacency=100 → ≈40% degradation; at tilt=100 → ≈50%.
+    // React:  base × (1 + tilt/100) × (1 + complacency/300) / moodMult
+    //         At complacency=100 → ~33% slower; at tilt=100 → 2× slower.
+    // Sense:  base × (1 − complacency/200)
+    //         At complacency=100 → 50% — "не смотрит на радар, не слышит шаги".
     public int CurrentAimSkill =>
-        ClampSkill((int)Math.Round(AimSkillBase * MoodMultiplier(Mood) * (1.0 - Tilt / 200.0)));
+        ClampSkill((int)Math.Round(
+            AimSkillBase * MoodMultiplier(Mood)
+            * (1.0 - Tilt / 200.0)
+            * (1.0 - Complacency / 250.0)));
     public int CurrentReactionMs =>
-        Math.Clamp((int)Math.Round(ReactionBaseMs * (1.0 + Tilt / 100.0) / MoodMultiplier(Mood)), 100, 600);
+        Math.Clamp((int)Math.Round(
+            ReactionBaseMs * (1.0 + Tilt / 100.0)
+            * (1.0 + Complacency / 300.0)
+            / MoodMultiplier(Mood)), 100, 800);
+    public int CurrentGameSense =>
+        ClampSkill((int)Math.Round(GameSense * (1.0 - Complacency / 200.0)));
     public int CurrentChattiness =>
         Math.Clamp(ChattinessBase + (ToxicityBase > 50 ? Tilt / 4 : -Tilt / 8), 0, 100);
     public int CurrentToxicity =>
@@ -152,12 +196,18 @@ public sealed class BotProfile
 
     // === Lifecycle ====================================================
     /// <summary>
-    /// Update dynamic state in response to a runtime event. Modules
-    /// fire this from EventPlayerDeath / RoundEnd / etc. For events not
+    /// Update dynamic state in response to a runtime event. Modules fire
+    /// this from EventPlayerDeath / EventRoundEnd / etc. For events not
     /// listed, this is a no-op (forward-compat — modules can fire
     /// arbitrary kinds without errors).
+    ///
+    /// "RoundEnd" with non-null <paramref name="args"/> updates streaks +
+    /// mood + complacency (skill-gap based). "RoundEnd" without args
+    /// only bumps RoundsPlayed and recomputes mood — legacy path.
     /// </summary>
-    public void NotifyEvent(string kind)
+    public void NotifyEvent(string kind) => NotifyEvent(kind, null);
+
+    public void NotifyEvent(string kind, RoundEventArgs? args)
     {
         switch (kind)
         {
@@ -173,9 +223,37 @@ public sealed class BotProfile
 
             case "RoundEnd":
                 RoundsPlayed++;
+                if (args != null)
+                {
+                    if (args.Win)
+                    {
+                        WinStreak++;
+                        LossStreak = 0;
+                        Tilt = Math.Max(0, Tilt - 3);
+                    }
+                    else
+                    {
+                        LossStreak++;
+                        WinStreak = 0;
+                        if (LossStreak >= 2)
+                            Tilt = Math.Min(100, Tilt + 3 + (TiltProneness / 12));
+                    }
+                }
                 RecomputeMood();
+                if (args != null && RoundsPlayed > 1)
+                    UpdateComplacency(args);
+                // Frustrated mood breaks complacency by definition.
+                if (Mood == Mood.Frustrated && Complacency > 15f)
+                    Complacency = 15f;
+                if (Complacency >= 50f) RoundsAtHighComp++;
+                else                    RoundsAtHighComp = 0;
                 break;
 
+            // Legacy single-string events — kept for forward compat with
+            // any caller that only knows the string-only NotifyEvent. The
+            // streak/tilt update they do is also done inside RoundEnd
+            // when args are provided, so don't mix-and-match (caller
+            // picks one path or the other).
             case "RoundWin":
                 WinStreak++;
                 LossStreak = 0;
@@ -189,6 +267,82 @@ public sealed class BotProfile
                     Tilt = Math.Min(100, Tilt + 3 + (TiltProneness / 12));
                 break;
         }
+    }
+
+    /// <summary>
+    /// Skill-gap complacency drift, called once per RoundEnd when args
+    /// are present. Implements the spec from 2026-05-08:
+    ///   gap > +40   → +10..20
+    ///   gap > +25   → +5..10
+    ///   gap > +15   → small drift toward 0
+    ///   ±15        → equal match, drift to 0
+    ///   gap < -15   → -5..10 (собирается)
+    ///   gap < -30   → -10..20
+    /// Plus: Win × highGap → +3..5 (confirms "easy"). Loss × comp≥50 →
+    /// wakeup chance roll (60% − comp/4, with psychology mods).
+    /// Smurf bonus ×1.3 on positive deltas (играет вполсилы по дизайну).
+    /// Per-round movement capped to avoid >25 jumps in either direction
+    /// (besides successful wakeups, which can dump 30..50).
+    /// </summary>
+    private void UpdateComplacency(RoundEventArgs args)
+    {
+        var rng = new MiniRng(Seed ^ ((ulong)RoundsPlayed * 0x9E3779B97F4A7C15UL));
+        double gap = args.OwnTeamAvgSkill - args.EnemyTeamAvgSkill;
+        float delta;
+
+        if (gap > 40)        delta = 10f + rng.NextRange(0, 11);    // +10..20
+        else if (gap > 25)   delta =  5f + rng.NextRange(0,  6);    // +5..10
+        else if (gap > 15)   delta = -Math.Min(Complacency, 1f + rng.NextRange(0, 3));
+        else if (gap > -15)  delta = -Math.Min(Complacency, 2f + rng.NextRange(0, 4));
+        else if (gap > -30)  delta = -(5f + rng.NextRange(0, 6));   // -5..-10
+        else                 delta = -(10f + rng.NextRange(0, 11)); // -10..-20
+
+        // Smurf — recharges complacency 1.3× (плеер вполсилы по дизайну).
+        if (Archetype == BotArchetype.Smurf && delta > 0)
+            delta *= 1.3f;
+
+        // Round outcome modifiers.
+        if (args.Win && gap > 25)
+            delta += 3f + rng.NextRange(0, 3);  // +3..5 — "и так норм"
+        else if (!args.Win && Complacency >= 50f)
+            delta = ApplyWakeupChance(delta, rng);
+
+        // Cap per-round movement (anti-detect: real complacency drifts smoothly).
+        if (delta >  25f) delta =  25f;
+        if (delta < -50f) delta = -50f;  // wakeups can be larger
+
+        Complacency = Math.Clamp(Complacency + delta, 0f, 100f);
+    }
+
+    /// <summary>
+    /// Loss-while-complacent dice roll. Returns the delta to apply
+    /// instead of the raw spec one — successful wakeup is a big drop
+    /// (30..50, modulated by aggression), failed wakeup is symbolic
+    /// (-2..-5) so the bot keeps playing relaxed for another round.
+    /// </summary>
+    private float ApplyWakeupChance(float fallthroughDelta, MiniRng rng)
+    {
+        // Base 60% − complacency/4. At comp=50 → 47.5%, comp=90 → 37.5%.
+        double wakeupChance = 0.60 - Complacency / 400.0;
+        if (TiltProneness > 70)   wakeupChance *= 0.7;  // тилтеры вместо собранности уходят в тильт
+        if (GameSense > 60)       wakeupChance *= 1.3;  // опытные раньше замечают
+        if (AggressionBase > 70)  wakeupChance *= 1.2;  // агрессивные собираются быстрее
+
+        if (rng.NextDouble() < wakeupChance)
+        {
+            // Wakeup successful — big drop.
+            float drop = 30f + rng.NextRange(0, 21);
+            // Aggressive bots wake but still slightly underestimate;
+            // clamp final complacency to land in 20..30 range.
+            if (AggressionBase > 70)
+            {
+                float target = 20f + rng.NextRange(0, 11);
+                drop = Math.Max(drop, Complacency - target);
+            }
+            return -drop;
+        }
+        // Wakeup failed — symbolic drop, bot keeps playing relaxed.
+        return -2f - rng.NextRange(0, 4);
     }
 
     private void RecomputeMood()
@@ -376,6 +530,25 @@ public sealed class BotProfile
         // 10. Time zone — biased by region.
         int tz = TimeZoneForRegion(region, rng.NextUlong());
 
+        // 11. Complacency style — flavor of "не играет", set from archetype.
+        //     Showoff = no-scopes / ножевые выходы / гранаты-ради-красоты.
+        //     Lazy    = сидит дальше / отказывается от инициативы.
+        //     Passive = странные углы, дисэнгейдж от боя.
+        ComplacencyStyle compStyle = arch switch
+        {
+            BotArchetype.SchoolRusher
+                or BotArchetype.SilverKamikaze
+                or BotArchetype.EgoCarry
+                or BotArchetype.Smurf       => ComplacencyStyle.Showoff,
+            BotArchetype.AwpCamper
+                or BotArchetype.BoomerOnM4  => ComplacencyStyle.Passive,
+            BotArchetype.Silent
+                or BotArchetype.OldPC
+                or BotArchetype.TeamPlayer
+                or BotArchetype.Tilter      => ComplacencyStyle.Lazy,
+            _                                => ComplacencyStyle.Lazy,
+        };
+
         return new BotProfile
         {
             Seed                     = seed,
@@ -399,6 +572,7 @@ public sealed class BotProfile
             TiltProneness            = tiltProne,
             Patience                 = patience,
             TeamPlayerBias           = teamPlayer,
+            ComplacencyStyle         = compStyle,
         };
     }
 
@@ -499,18 +673,22 @@ public sealed class BotProfile
     /// </summary>
     public string DebugDump()
     {
+        var wakeupLabel = Complacency >= 50f
+            ? $"wakeup={(0.60 - Complacency / 400.0) * 100:F0}%baseline"
+            : "wakeup=n/a";
         return
-            $"  archetype:    {Archetype}\n" +
+            $"  archetype:    {Archetype} (complacencyStyle={ComplacencyStyle})\n" +
             $"  identity:     region={Region} lang={Language} accAge={AccountAgeDays}d tz=UTC{LocalTimeZoneOffsetHours:+#;-#;0}\n" +
             $"  hardware:     tier={Hardware} fps={BaselineFPS}\n" +
             $"  network:      {Network}\n" +
             $"  skill:        rating={SkillRating} aim={AimSkillBase} mov={MovementSkill} sense={GameSense} react={ReactionBaseMs}ms\n" +
             $"  psychology:   aggr={AggressionBase} tox={ToxicityBase} chat={ChattinessBase} tiltProne={TiltProneness} patience={Patience} teamPlay={TeamPlayerBias}\n" +
-            $"  dynamic:      mood={Mood} tilt={Tilt} W{WinStreak}/L{LossStreak} rounds={RoundsPlayed} K{Kills}/D{Deaths}\n" +
-            $"  computed:     curAim={CurrentAimSkill} curReact={CurrentReactionMs}ms curChat={CurrentChattiness} curTox={CurrentToxicity}";
+            $"  dynamic:      mood={Mood} tilt={Tilt} comp={Complacency:F1} (highStreak={RoundsAtHighComp}, {wakeupLabel}) W{WinStreak}/L{LossStreak} rounds={RoundsPlayed} K{Kills}/D{Deaths}\n" +
+            $"  computed:     curAim={CurrentAimSkill} curReact={CurrentReactionMs}ms curSense={CurrentGameSense} curChat={CurrentChattiness} curTox={CurrentToxicity}";
     }
 
-    /// <summary>Tiny RNG used during static generation (state-coupled, no GC).</summary>
+    /// <summary>Tiny RNG used during static generation + complacency
+    /// updates (state-coupled, no GC).</summary>
     private struct MiniRng
     {
         private ulong _s;
@@ -524,6 +702,13 @@ public sealed class BotProfile
                 _s = x;
                 return x * 0x2545F4914F6CDD1DUL;
             }
+        }
+        public double NextDouble() => (NextUlong() >> 11) * (1.0 / (1UL << 53));
+        /// <summary>Returns int in [lo, hi) — half-open, matching System.Random.</summary>
+        public int NextRange(int lo, int hi)
+        {
+            if (hi <= lo) return lo;
+            return lo + (int)(NextUlong() % (ulong)(hi - lo));
         }
     }
 }
