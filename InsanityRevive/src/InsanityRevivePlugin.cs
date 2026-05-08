@@ -224,6 +224,52 @@ public sealed class InsanityRevivePlugin : BasePlugin
         info.ReplyToCommand($"[Insanity] reveal: prev={prevStage} → Stage0");
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Stage 4 probes (temporary live-verification commands; see Probe.cs)
+    // ──────────────────────────────────────────────────────────────────
+
+    [ConsoleCommand("insanity_probe_glow", "Probe 1: tint a bot's pawn red via m_clrRender")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 1, usage: "<slot> [r g b]")]
+    public void OnProbeGlow(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        if (!int.TryParse(info.GetArg(1), out var slot)) {
+            info.ReplyToCommand("[probe] usage: insanity_probe_glow <slot> [r g b]");
+            return;
+        }
+        byte r = 255, g = 0, b = 0;
+        if (info.ArgCount >= 5
+            && byte.TryParse(info.GetArg(2), out var pr)
+            && byte.TryParse(info.GetArg(3), out var pg)
+            && byte.TryParse(info.GetArg(4), out var pb)) { r = pr; g = pg; b = pb; }
+        info.ReplyToCommand($"[probe] {Probe.Glow(slot, r, g, b)}");
+    }
+
+    [ConsoleCommand("insanity_probe_c4", "Probe 2: GiveNamedItem(weapon_c4) on a bot")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 1, usage: "<slot>")]
+    public void OnProbeC4(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        if (!int.TryParse(info.GetArg(1), out var slot)) {
+            info.ReplyToCommand("[probe] usage: insanity_probe_c4 <slot>");
+            return;
+        }
+        info.ReplyToCommand($"[probe] {Probe.GiveC4(slot)}");
+    }
+
+    [ConsoleCommand("insanity_probe_hurtzero", "Probe 3: arm/disarm BotDamagePatch as alt damage filter")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 0, usage: "[arm|disarm]")]
+    public void OnProbeHurtZero(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        var arg = info.ArgCount > 1 ? info.GetArg(1).Trim().ToLowerInvariant() : "arm";
+        var msg = arg == "disarm" ? Probe.HurtZeroDisarm(_manager) : Probe.HurtZeroArmOnce(_manager);
+        info.ReplyToCommand($"[probe] {msg}");
+    }
+
     [ConsoleCommand("insanity_hider_active", "Toggle InsanityHider BOT-icon hiding (0/1)")]
     [RequiresPermissions("@css/generic")]
     public void OnHiderActive(CCSPlayerController? caller, CommandInfo info)
