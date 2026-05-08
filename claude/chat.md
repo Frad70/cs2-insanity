@@ -515,6 +515,12 @@ User pivoted mid-session from a targeted ping-only spec to a unified-profile arc
 **Build:** 0 warnings, 0 errors. Deterministic build (from step 6).
 
 **Sha256 baseline после v0.7.1-beta:**
-- DLL: `026d4d9ac3ed53014b1cf36884a5bbf4052159f9e18ae80bbec15ebabf708010`
+- DLL: `6ad1d10f5471b9a8ba1f4bad9356ed534732822353ab54c413aa90e7c5d0b6eb` (deterministic clean build, deployed via `scripts/deploy.sh --auto`)
+
+**Errata:** the pre-deploy chat.md stanza for this commit recorded `026d4d9ac3ed53014b1cf36884a5bbf4052159f9e18ae80bbec15ebabf708010`, which came from an INCREMENTAL build (the `bin/`+`obj/` cache was warm from earlier in the session). When `deploy.sh --auto` ran the canonical build, `Deterministic`+`ContinuousIntegrationBuild` produced the deterministic hash above. Verified: two consecutive `rm -rf bin/Release obj/Release && dotnet build -c Release` runs both produced `6ad1d10…`. So the working deterministic hash for tag v0.7.1-beta on commit aa908ba is the corrected one. Lesson for next time: always sha-sum AFTER `deploy.sh` (which forces clean rebuild), not after a hand-run incremental build.
+
+**Live verification (smoke this session):**
+- `insanity_profile 17` returned a coherent SilverKamikaze profile for `broky`: silver-tier mid-PC NA player on home cable, low aim+slow reaction (skill=22, aim=26, react=336ms — formula `380 − aim·2 + noise` checks out), high aggression+low patience+low team play (kamikaze archetype constraints satisfied), English, ~1y account. All ranges within their archetype declarations.
+- `insanity_status` row format updated: `net=<ConnectionType> arch=<BotArchetype> skill=N mood=X tilt=N`. Variety across the live fleet: SilverKamikaze, Smurf, EgoCarry, Random — different archetypes, different ConnectionTypes (CableNormal, CableStable, WifiGood). No two identical profiles.
 
 — agent botprofile-umbrella
