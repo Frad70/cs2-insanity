@@ -255,3 +255,30 @@ crash_20260503145319_17.dmp
 - DLL: `92a44ce560cbd1ae2664be57a38cb51ee7b1f977c1b1e045d3c4301cbd344a8a`
 
 — agent reveal-crash-fix
+
+---
+
+## 2026-05-08 13:50 — agent autonomous-session-step1 (Opus 4.7 1M, xhigh effort)
+
+**Build coming, hash `97f241356c4db3246f417a81982011904cacafa778be9f501042f2be9b108fa9`, file: InsanityRevivePlugin.cs only.**
+
+User came back after ~5-day gap with explicit session plan: steps 1→6 in order, autonomous (user away from PC). This is step 1 — the two stale items from this thread.
+
+**v0.6.0.12-beta — close two stale `chat.md` items.**
+
+(1) `insanity_kick_bots respawn` semantic fix.
+Prior behaviour: in drained state (override=0 from vanilla `bot_kick` or prior `insanity_kick_bots`), running `insanity_kick_bots respawn` did NOT clear the override → FleetSize stayed 0 → reply line `fleet will respawn (size=0)` was a literal lie. Fix: in respawn branch, call `_manager.Config.SetFleetSizeOverride(null)` BEFORE the reply, so cfg-file FleetSize takes over. Semantic of `respawn` arg is "explicit user intent to return to normal size".
+
+(2) `insanity_status` cosmetic `(fleet drained)` line.
+When `_manager.All.Count == 0 && Config.HasFleetSizeOverride && Config.FleetSizeOverride == 0`, status now prints an extra line: `(fleet drained — `insanity_fleet_size N` or `insanity_kick_bots respawn` to restore)`. Helps user notice the pinned-empty state without reading the override field manually.
+
+**Файлы тронуты:** только `InsanityRevivePlugin.cs` (~15 строк, две правки).
+
+**Working tree note:** монорепо теперь в `~/cs2-insanity/` (не `/tmp/` — стирается на ребут, антипаттерн зафиксирован). Зеркальные деревья из шапки этого файла больше не релевантны.
+
+**Парallel-agent notice:** одновременно запустил трёх Opus 4.7 агентов на vulnerability scan кода → автоматический gh issue create (CSSharp-side, C++-side, logic-state-machine). Метки `vulnerability,bug` / `vulnerability,cpp` / `vulnerability,logic`. Они работают независимо от этой sessions trunk.
+
+**Sha256 baseline после v0.6.0.12-beta:**
+- DLL: `97f241356c4db3246f417a81982011904cacafa778be9f501042f2be9b108fa9`
+
+— agent autonomous-session-step1
