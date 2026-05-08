@@ -467,3 +467,54 @@ Manual-only trigger `!reveal_apocalypse` / `insanity_reveal_apocalypse`. Require
 - DLL: `04b113694b9f40bdafd78e8d9a9697328240a6f0a64fcf4a32c1c7bbaa6adc97`
 
 — agent autonomous-session-step6
+
+---
+
+## 2026-05-08 18:40 — agent botprofile-umbrella (Opus 4.7 1M, xhigh effort)
+
+**Build coming, hash `026d4d9ac3ed53014b1cf36884a5bbf4052159f9e18ae80bbec15ebabf708010`, files: BotProfile.cs (new), NetworkProfile.cs, NetworkSimulator.cs, FakeClient.cs, FakeClientManager.cs, InsanityRevivePlugin.cs.**
+
+**v0.7.1-beta — BotProfile umbrella + 11-connection-type network sim + microspike layer.**
+
+User pivoted mid-session from a targeted ping-only spec to a unified-profile architecture: every behaviour module (network now, future aim/chat/buy/movement) reads from a single per-bot `BotProfile` instead of inventing its own per-bot rng. Behavioural coherence: a "школьник на вайфае" bot must show low aim AND high chattiness AND high tilt-proneness AND wifi-shape pings — no franken-bots.
+
+**NEW `InsanityRevive/src/BotProfile.cs`** (~370 lines):
+- 11 archetypes (SchoolRusher / SilverKamikaze / EgoCarry / AwpCamper / TeamPlayer / Tilter / Silent / BoomerOnM4 / Smurf / OldPC / Random) with weights summing to 100, per spec table.
+- 6 enums: BotArchetype, HardwareTier, Region, BotLanguage, Mood + ConnectionType (in NetworkProfile.cs).
+- Fields: Identity (SteamID, Region, Language, AccountAge, TZ), Hardware (HardwareTier, BaselineFPS), Network (the layered NetworkProfile from earlier this session), Skill (SkillRating, AimSkillBase, MovementSkill, GameSense, ReactionBaseMs), Psychology (Aggression, Toxicity, Chattiness, TiltProneness, Patience, TeamPlayerBias).
+- Dynamic state: Mood (Fresh→Warmed→Tired/Frustrated state machine on RoundEnd), Tilt 0-100, Win/LossStreak, RoundsPlayed, Kills/Deaths.
+- Computed properties: CurrentAimSkill, CurrentReactionMs, CurrentChattiness, CurrentToxicity — apply Mood+Tilt modifiers to base values. Modules read these for realtime drift.
+- Correlations enforced in `Generate(seed)`: archetype → skill range → aim range → reaction (high aim ≈ 180ms reaction); archetype → hardware tier weights → ConnectionType bucket; region → language + timezone; FPS scales 30–400 by hardware.
+- API: `Profile.NotifyEvent(string kind)` — modules fire "Death" / "Kill" / "RoundEnd" / "RoundWin" / "RoundLoss" to update Tilt/Mood. Forward-compat (unknown kinds = no-op).
+- DEFERRED per spec "не пихать всё сразу": Habits (PreferredWeapons, EconomyStyle, PreferredPositions, UtilityUsage, PreferredSides), AvatarSeed, JSON persistence for reconnect, saved-personalities pool.
+
+**NEW network-side work (kept from pre-pivot):**
+- `NetworkProfile.cs` rewritten — 11 ConnectionType enum (CableStable / CableNormal / WifiGood / WifiMid / WifiBad / Mobile5G / Mobile4G / RegionFar / RegionVeryFar / SchoolNet / Vpn) with weights and per-type baseline / jitter / micro-spike-rate / light-spike params. Two factory methods: `Generate(seed)` (unbiased weighted), `GenerateForType(seed, type)` (BotProfile uses this with hardware-correlated bucket choice).
+- `NetworkSimulator.cs` extended — Layer 2 microspikes (always-on background, +5–15ms for 2 ticks at MicroSpikePerSec rate, independent of light spike), anti-flatline detector (30s without variation → forced microspike — flat lines look fake to statistical detectors), 5ms minimum ping floor, per-tick state debug dump.
+
+**Wiring:**
+- `FakeClient.Profile` now `BotProfile` (was `NetworkProfile`); `fc.Network` shortcut to `Profile.Network` preserves call-site shape for places that read network fields directly.
+- `FakeClientManager` line 418 generates `BotProfile.Generate(persona.SteamId64)` instead of `NetworkProfile.Generate(...)`. Telemetry net_summary still emits jitter via `fc.Network.JitterRangeMs` (one-line update).
+- `InsanityRevivePlugin.OnStatus` now shows `net=<ConnectionType> arch=<BotArchetype> skill=N mood=X tilt=N` per bot (was `profile=baseN/jitN`).
+- `InsanityRevivePlugin.OnPlayerDeath` dispatch now fires `Profile.NotifyEvent("Death")` on victim and `"Kill"` on attacker if attacker is also a managed bot. Minimal integration to verify the API; full event coverage (RoundEnd/RoundWin/RoundLoss) waits for a round-event hook in a follow-up.
+
+**NEW admin command** `insanity_profile <slot>` (chat: `!profile <slot>`) — multi-line dump:
+```
+[Insanity] BotProfile for #1 ZywOo (slot=0):
+  archetype:    AwpCamper
+  identity:     region=EuWest lang=German accAge=2143d tz=UTC+1
+  hardware:     tier=High fps=187
+  network:      WifiGood base=42ms jit=±4 micro=12.0/min spike=1.0/min (15–35ms peak, 400–800ms dur) loss=0.10%
+  skill:        rating=68 aim=87 mov=64 sense=70 react=205ms
+  psychology:   aggr=22 tox=18 chat=29 tiltProne=24 patience=83 teamPlay=38
+  dynamic:      mood=Fresh tilt=0 W0/L0 rounds=0 K0/D0
+  computed:     curAim=87 curReact=205ms curChat=29 curTox=18
+  simulator:    latency=43ms loss=no light=Idle(...) micro=(rem=0t peak=0) flatlineSince=12t
+```
+
+**Build:** 0 warnings, 0 errors. Deterministic build (from step 6).
+
+**Sha256 baseline после v0.7.1-beta:**
+- DLL: `026d4d9ac3ed53014b1cf36884a5bbf4052159f9e18ae80bbec15ebabf708010`
+
+— agent botprofile-umbrella

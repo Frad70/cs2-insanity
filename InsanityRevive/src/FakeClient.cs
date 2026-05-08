@@ -18,7 +18,17 @@ public sealed class FakeClient
     public int    Slot      { get; internal set; }
     public bool   Alive     { get; internal set; }
 
-    public NetworkProfile    Profile     { get; }
+    /// <summary>
+    /// Single source of truth for everything about this bot's "character"
+    /// — identity, hardware, network, skill, psychology. Behaviour modules
+    /// (network sim, future aim/chat/buy) read from here instead of
+    /// inventing their own per-bot rng.
+    /// </summary>
+    public BotProfile        Profile     { get; }
+    /// <summary>Shortcut to <c>Profile.Network</c>. Kept because every
+    /// network-side caller previously typed <c>fc.Profile.X</c> when
+    /// <c>Profile</c> was a NetworkProfile; preserves call-site shape.</summary>
+    public NetworkProfile    Network     => Profile.Network;
     public NetworkSimulator  Simulator   { get; }
     public InputBuffer       Buffer      { get; }
     public PingDisplay       PingView    { get; }
@@ -28,7 +38,7 @@ public sealed class FakeClient
     private long _summaryLatencyAcc;
     private int _summaryLossEvents;
 
-    public FakeClient(int id, int personaId, string name, ulong steamId, FakeTeam team, NetworkProfile profile)
+    public FakeClient(int id, int personaId, string name, ulong steamId, FakeTeam team, BotProfile profile)
     {
         Id        = id;
         PersonaId = personaId;
@@ -38,7 +48,7 @@ public sealed class FakeClient
         Slot      = -1;
         Alive     = false;
         Profile   = profile;
-        Simulator = new NetworkSimulator(profile, steamId ^ 0xFEEDFACECAFEBEEFUL);
+        Simulator = new NetworkSimulator(profile.Network, steamId ^ 0xFEEDFACECAFEBEEFUL);
         Buffer    = new InputBuffer();
         PingView  = new PingDisplay();
     }

@@ -415,7 +415,7 @@ public sealed class FakeClientManager : IDisposable
         // Build live FakeClient — volatile slot-bound state.
         var id = _nextId++;
         var team = (ctrl.TeamNum == 3 ? FakeTeam.CT : FakeTeam.T);
-        var profile = NetworkProfile.Generate(persona.SteamId64);
+        var profile = BotProfile.Generate(persona.SteamId64);
         var source = _commandSpawnsPending > 0 ? "command" : "engine_quota";
         if (source == "command") _commandSpawnsPending--;
 
@@ -592,7 +592,7 @@ public sealed class FakeClientManager : IDisposable
             var (avg, loss) = fc.DrainSummary();
             Telemetry.Write("net_summary", new Dictionary<string, object?> {
                 { "botId", fc.Id }, { "avgPingMs", avg },
-                { "jitterMs", fc.Profile.JitterRangeMs }, { "lossRate60s", loss } });
+                { "jitterMs", fc.Network.JitterRangeMs }, { "lossRate60s", loss } });
         }
 
         // 1-second persistent bot_quota re-assert. Engine resets quota at
