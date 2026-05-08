@@ -16,10 +16,15 @@
          and chat.md history of v0.6.0.7→0.8 + v0.6.0.10→0.11 incidents. -->
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <!-- HintPath for CounterStrikeSharp.API.dll. Defaults to the live-server
+         install path so `dotnet build` works on the box. CI overrides via
+         `-p:CSSharpApiPath=…` to point at a runner-fetched copy, avoiding
+         in-place edits to this file. -->
+    <CSSharpApiPath Condition="'$(CSSharpApiPath)' == ''">/mnt/storage/cs2-server/game/csgo/addons/counterstrikesharp/api/CounterStrikeSharp.API.dll</CSSharpApiPath>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="CounterStrikeSharp.API">
-      <HintPath>/mnt/storage/cs2-server/game/csgo/addons/counterstrikesharp/api/CounterStrikeSharp.API.dll</HintPath>
+      <HintPath>$(CSSharpApiPath)</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

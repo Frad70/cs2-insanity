@@ -1,0 +1,13 @@
+# Whitespace conventions enforced by .github/workflows/lint.yml.
+#
+# Scope is intentionally narrow: trailing whitespace, final newline,
+# LF line endings, UTF-8. Indent size/style is NOT enforced — the C++
+# half mixes its own conventions with vendored Source SDK style and the
+# C# half is policed by the compiler / -warnaserror.
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true

@@ -126,14 +126,14 @@ RegisterListener<Listeners.OnEntityTakeDamagePre>((entity, info) => {
     // info.Attacker = damage source
     // info.Inflictor = projectile/weapon entity (e.g. CMolotovProjectile, CInferno)
     // info.Damage = float — can be modified, OR return Handled to fully cancel
-    
+
     if (Stage == RevealStage.Idle) return HookResult.Continue;
-    
+
     var victimSlot = ResolveSlot(entity);
     if (victimSlot == null) return HookResult.Continue;
     bool victimIsBot = _mgr.FindBySlot(victimSlot.Value) != null;
     if (!victimIsBot) return HookResult.Continue;  // human victim — let damage flow
-    
+
     // Bot victim: filter damage from inferno / molotov / hegrenade / other bots
     var inflictorClass = info.Inflictor?.DesignerName;
     if (inflictorClass is "inferno" or "molotov_projectile" or "hegrenade_projectile") {
