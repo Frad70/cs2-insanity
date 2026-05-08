@@ -427,4 +427,43 @@ Manual-only trigger `!reveal_apocalypse` / `insanity_reveal_apocalypse`. Require
 - 🔴 beep audibility: 5 soundevent candidates. If none play, future patch tries `weapons/c4/c4_beep1.vsnd_c` raw path or alternative sound system entry.
 - 🟢 (verified live this session): trigger gating, carrier promotion, BotDamagePatch install, no crashes.
 
+**Full-cycle verification:** triggered apocalypse from Stage 0, watched Stage 0 → Stage 1 (concurrent) → Stage 4 transition. Telemetry JSONL shows clean cycle: `{stage: Stage0, t: 14:14:15} → {Stage1, 14:14:20} → {Stage4 APOCALYPSE, 14:14:23} → {End, 14:15:53} → {reveal_cleanup, 14:15:53}`. 90s Stage4 max-duration hit, totalKills=9 (bot-vs-bot from Stage 1 team flip combat).
+
 — agent autonomous-session-step5
+
+---
+
+## 2026-05-08 14:18 — agent autonomous-session-step6 (Opus 4.7 1M, xhigh effort)
+
+**Step 6 — DLL drift fix infrastructure.** Optional per session plan; doing it before wrapping up since the determinism win pays off immediately.
+
+**Three changes:**
+
+(1) `scripts/deploy.sh` — guarded build/deploy script.
+- Refuses to run if working tree is dirty (commit-first discipline).
+- Builds Release, computes sha256 + reads commit-sha + nearest tag.
+- Prints a chat.md-ready stanza for paste (or auto-appends with `--append-chat`).
+- Three modes: `--build-only` / `--auto` / interactive (default).
+- DEPLOY_DIR env var for non-default targets.
+- Verifies deployed sha matches built sha post-copy.
+
+(2) `InsanityRevive.csproj` — `<Deterministic>true</Deterministic>` + `<ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>`. Verified live: two consecutive `rm -rf bin/ obj/ && dotnet build -c Release` produce identical sha256 `04b113694b9f40bdafd78e8d9a9697328240a6f0a64fcf4a32c1c7bbaa6adc97`. Closes the "is the drift real, or just non-determinism?" diagnosis hole.
+
+(3) `.github/workflows/build.yml` — GitHub Actions CI.
+- Triggers on push to main + PR + tag push.
+- Fetches matching CSSharp release zip, extracts API dll, repoints csproj HintPath at the CI-fetched copy (so CI doesn't depend on `/mnt/storage/cs2-server/` paths).
+- `dotnet build -warnaserror` — keeps the codebase clean (currently 0 warnings).
+- Uploads DLL+PDB as artifacts (14-day retention).
+- Builds CSSharp side only — InsanityHider C++ side needs hl2sdk-cs2 (private Valve SDK) so it stays as a local-only build.
+
+**Working-tree policy** (adopted earlier this session, mentioned here for the record): local clone lives at `~/cs2-insanity/`, NEVER `/tmp/`. Two of the prior DLL-drift incidents were caused by `/tmp/insanity-monorepo/` getting wiped on system reboot — recover-from-origin worked but a pre-deploy build raced with a non-tracked local edit. Pinning the clone to `~/` makes that class of incident a build-time impossibility.
+
+**Files added:**
+- `scripts/deploy.sh` (~100 lines, executable)
+- `.github/workflows/build.yml` (~70 lines)
+- `InsanityRevive/InsanityRevive.csproj` (+9 lines: two property tags + comment)
+
+**Sha256 baseline после шага 6** (deterministic build, fresh clean build):
+- DLL: `04b113694b9f40bdafd78e8d9a9697328240a6f0a64fcf4a32c1c7bbaa6adc97`
+
+— agent autonomous-session-step6
