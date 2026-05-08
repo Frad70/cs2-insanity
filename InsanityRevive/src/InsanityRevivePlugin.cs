@@ -198,21 +198,30 @@ public sealed class InsanityRevivePlugin : BasePlugin
         }
     }
 
-    [ConsoleCommand("insanity_spawn_bots", "Spawn N fake bots split across teams")]
+    [ConsoleCommand("insanity_spawn_bots", "Spawn N fake bots; team = ct|t|split (default split)")]
     [RequiresPermissions("@css/cheats")]
-    [CommandHelper(minArgs: 0, usage: "[count]")]
+    [CommandHelper(minArgs: 0, usage: "[count] [ct|t|split]")]
     public void OnSpawnBots(CCSPlayerController? caller, CommandInfo info)
     {
         if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
         var n = _config?.DefaultBotCount ?? 5;
         if (info.ArgCount > 1 && int.TryParse(info.GetArg(1), out var parsed)) n = Math.Clamp(parsed, 1, 32);
 
+        // teamArg: "ct" / "t" force one side; anything else (incl. "split") splits.
+        string teamArg = info.ArgCount > 2 ? info.GetArg(2).Trim().ToLowerInvariant() : "split";
+        FakeTeam? forced = teamArg switch {
+            "ct" => FakeTeam.CT,
+            "t"  => FakeTeam.T,
+            _    => (FakeTeam?)null,
+        };
+
         for (var i = 0; i < n; i++)
         {
-            var team = (i % 2 == 0) ? FakeTeam.CT : FakeTeam.T;
+            var team = forced ?? ((i % 2 == 0) ? FakeTeam.CT : FakeTeam.T);
             _manager.Spawn(team);
         }
-        info.ReplyToCommand($"[Insanity] queued {n} bot_add commands; see scoreboard in ~1s");
+        var label = forced.HasValue ? forced.Value.ToString() : "split CT/T";
+        info.ReplyToCommand($"[Insanity] queued {n} bot_add → {label}; see scoreboard in ~1s");
     }
 
     [ConsoleCommand("insanity_kick_bots", "Kick all fake bots; pins FleetSize=0 unless 'respawn' arg given")]
