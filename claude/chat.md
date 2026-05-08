@@ -524,3 +524,77 @@ User pivoted mid-session from a targeted ping-only spec to a unified-profile arc
 - `insanity_status` row format updated: `net=<ConnectionType> arch=<BotArchetype> skill=N mood=X tilt=N`. Variety across the live fleet: SilverKamikaze, Smurf, EgoCarry, Random — different archetypes, different ConnectionTypes (CableNormal, CableStable, WifiGood). No two identical profiles.
 
 — agent botprofile-umbrella
+
+---
+
+## 2026-05-08 ~19:00 — agent botprofile-complacency (Opus 4.7 1M, xhigh effort)
+
+**v0.7.2-beta — Complacency dynamic state (расслабон от лёгкого противника).**
+
+User spec follow-up to v0.7.1-beta — Mood/Tilt only react to bot's own results, but real players also relax when fighting weaker enemies AND don't always snap out of it when losing. Adds a third dynamic axis.
+
+**New BotProfile fields:**
+- `Complacency` (float 0..100) — current relaxation level.
+- `RoundsAtHighComp` (int) — consecutive rounds with comp ≥ 50 (analytics).
+- `ComplacencyStyle` (enum Lazy/Showoff/Passive) — flavor for future behaviour modules; set from archetype at generation:
+  - SchoolRusher / SilverKamikaze / EgoCarry / Smurf → Showoff (no-scopes, knife-outs, gimmick utility)
+  - AwpCamper / BoomerOnM4 → Passive (странные углы, отказ от engage)
+  - Silent / OldPC / TeamPlayer / Tilter → Lazy (сидит дальше, отказ от инициативы)
+  - Random → Lazy (default)
+
+**New API surface:**
+- `RoundEventArgs { Win, OwnTeamAvgSkill, EnemyTeamAvgSkill, OwnPerformance }` — payload class.
+- `BotProfile.NotifyEvent(string kind, RoundEventArgs? args)` overload — `RoundEnd` with non-null args triggers full (streak + mood + complacency) update; without args is the legacy mood-only path. Old `NotifyEvent(string)` calls still work.
+
+**Computed properties extended (the visible effect of complacency):**
+- `CurrentAimSkill = base × moodMult × (1 − tilt/200) × (1 − complacency/250)` — at comp=100 → ≈40% aim drop.
+- `CurrentReactionMs = base × (1 + tilt/100) × (1 + complacency/300) / moodMult` — at comp=100 → ~33% slower reactions.
+- `CurrentGameSense = base × (1 − complacency/200)` — NEW, at comp=100 → 50% sense (не смотрит на радар, не слышит шаги).
+
+**Skill-gap math (per spec):**
+```
+gap > +40   → comp +10..20
+gap > +25   → comp +5..10
+gap > +15   → drift toward 0 (small)
+±15        → strong drift to 0 (equal match)
+gap < -15   → comp −5..10 (собирается)
+gap < -30   → comp −10..20
+Win × highGap   → comp +3..5 ("и так норм")
+Smurf  × posDelta → ×1.3 (играет вполсилы по дизайну)
+Per-round movement capped to ±25 (anti-detect — реальный complacency дрейфует плавно).
+First round excluded — никто не успел оценить соперника.
+Frustrated mood overrides — clamps comp ≤ 15.
+```
+
+**Wakeup chance mechanic (spec's "может не вернуться"):**
+- Triggered: Loss × Complacency ≥ 50.
+- Base: `60% − complacency/4` (so comp=50→47.5%, comp=70→42.5%, comp=90→37.5%).
+- Modifiers:
+  - `tiltProneness > 70` → ×0.7 (тилтеры уходят в тильт вместо собранности)
+  - `gameSense > 60` → ×1.3 (опытные раньше замечают что план не работает)
+  - `aggression > 70` → ×1.2 (агрессивные собираются), но при успехе complacency не до 0, а до 20..30 (всё равно недооценивают)
+- Failed wakeup → comp drops only −2..−5 (бот продолжает играть расслабленно).
+- Successful wakeup → comp drops 30..50.
+
+**EventRoundEnd handler in InsanityRevivePlugin.cs:**
+- Hooks `EventRoundEnd`, gets `Winner` team (2=T, 3=CT, 0=draw).
+- Computes per-team avg skill: bots use their stable `Profile.SkillRating`; humans use `EstimateHumanSkill(c)` (v1: derives from `c.Score`, baseline 50; future: K/D from MatchStats once observation window builds up). This implements the "оценивать по наблюдаемому скиллу, не по hidden SkillRating" anti-detect rule from the spec.
+- Dispatches `NotifyEvent("RoundEnd", args)` to each managed bot with own/enemy averages and win flag.
+
+**Updated `insanity_profile` dump:**
+```
+archetype:    SilverKamikaze (complacencyStyle=Showoff)
+…
+dynamic:      mood=Fresh tilt=0 comp=0.0 (highStreak=0, wakeup=n/a) W0/L0 rounds=0 K0/D0
+computed:     curAim=26 curReact=336ms curSense=25 curChat=59 curTox=60
+```
+(Added `comp=N (highStreak=N, wakeup=N%baseline)` and `curSense=N`.)
+
+**Deferred (3rd-pass per user "С чего начать"):**
+- Cascading complacency (TeamComplacencyBonus = 0.2 × avg(others)).
+- Behavioural modifiers (push-alone ×1.5 above 50, gimmick utility ×2 above 60, eco-purchase wrong-round above 70, knife-mid-map above 80) — wait until movement/buy modules.
+- Post-match observed-skill K/D-from-MatchStats refinement — current Score-based estimate is coarse.
+
+**Build:** 0 warnings, 0 errors. Hash recorded post-deploy via deploy.sh.
+
+— agent botprofile-complacency

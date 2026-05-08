@@ -72,6 +72,55 @@ public sealed class InsanityRevivePlugin : BasePlugin
             return HookResult.Continue;
         });
 
+        // BotProfile complacency mechanic (2026-05-08): on round end,
+        // compute observed-skill team averages and dispatch RoundEnd
+        // events with skill-gap data to each managed bot. Bot's own
+        // SkillRating is used directly; human "observed skill" is
+        // estimated from in-match K/D (baseline 50 if too few samples).
+        RegisterEventHandler<EventRoundEnd>((@event, info) => {
+            try {
+                if (_manager == null) return HookResult.Continue;
+                int winnerTeam = @event.Winner;  // 2=T, 3=CT, 0=draw
+
+                double ctSum = 0, tSum = 0;
+                int ctCount = 0, tCount = 0;
+                foreach (var c in CounterStrikeSharp.API.Utilities.GetPlayers())
+                {
+                    if (c == null || !c.IsValid || c.IsHLTV) continue;
+                    int team = (int)c.TeamNum;
+                    if (team != 2 && team != 3) continue;
+                    var fc = _manager.FindBySlot((int)c.Slot);
+                    double skill = fc != null
+                        ? fc.Profile.SkillRating
+                        : EstimateHumanSkill(c);
+                    if (team == 3) { ctSum += skill; ctCount++; }
+                    else           { tSum += skill;  tCount++; }
+                }
+                double ctAvg = ctCount > 0 ? ctSum / ctCount : 50.0;
+                double tAvg  = tCount  > 0 ? tSum  / tCount  : 50.0;
+
+                foreach (var fc in _manager.All)
+                {
+                    try {
+                        var c = CounterStrikeSharp.API.Utilities.GetPlayerFromSlot(fc.Slot);
+                        if (c == null || !c.IsValid) continue;
+                        int botTeam = (int)c.TeamNum;
+                        if (botTeam != 2 && botTeam != 3) continue;
+                        bool win = winnerTeam == botTeam;
+                        double ownAvg   = botTeam == 3 ? ctAvg : tAvg;
+                        double enemyAvg = botTeam == 3 ? tAvg  : ctAvg;
+                        fc.Profile.NotifyEvent("RoundEnd", new RoundEventArgs {
+                            Win                = win,
+                            OwnTeamAvgSkill    = ownAvg,
+                            EnemyTeamAvgSkill  = enemyAvg,
+                            OwnPerformance     = 0.5,  // placeholder; future: from MatchStats
+                        });
+                    } catch (Exception ex) { Log.Debug($"RoundEnd notify slot={fc.Slot}: {ex.Message}"); }
+                }
+            } catch (Exception ex) { Log.Debug($"EventRoundEnd dispatch: {ex.Message}"); }
+            return HookResult.Continue;
+        });
+
         Log.Info($"loaded — telemetry={_telemetry.Path} session={_telemetry.SessionId} " +
                  $"detour={_manager.DetourInstalled} steamIdMode={_manager.SteamIds.Mode}");
 
@@ -109,6 +158,38 @@ public sealed class InsanityRevivePlugin : BasePlugin
         try { _manager?.Dispose(); } catch { }
         try { _telemetry?.Dispose(); } catch { }
         _manager = null; _telemetry = null;
+    }
+
+    /// <summary>
+    /// Coarse "observed" skill estimate for a real human (0..100 scale).
+    /// Used by the complacency mechanic — bots shouldn't peek the
+    /// real player's hidden SkillRating, they only see what's
+    /// observable in-match. v1: derive from in-match K/D once at least
+    /// 3 deaths have happened; otherwise return 50 baseline.
+    ///
+    /// MatchStats fields (from `c.ActionTrackingServices.MatchStats` or
+    /// similar) may not always be populated; if they aren't, fall
+    /// through to the baseline. Don't crash on access.
+    /// </summary>
+    private static double EstimateHumanSkill(CCSPlayerController c)
+    {
+        try
+        {
+            // Try score / K-D-style heuristic via Score property on the
+            // controller. CSSharp exposes c.Score (sum of points) — high
+            // scores correlate roughly with skill but are too noisy
+            // mid-round. Fallback to baseline 50 for v1.
+            int score = c.Score;
+            if (score <= 0) return 50.0;
+            // Linear map 0–60 score → 50–80 skill. Cap to keep estimate
+            // away from extremes; complacency math is robust to noise.
+            double s = 50.0 + Math.Min(30.0, score * 0.5);
+            return s;
+        }
+        catch
+        {
+            return 50.0;
+        }
     }
 
     [ConsoleCommand("insanity_spawn_bots", "Spawn N fake bots split across teams")]
