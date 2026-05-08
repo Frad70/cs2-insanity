@@ -148,6 +148,12 @@ public sealed class InsanityRevivePlugin : BasePlugin
             return HookResult.Continue;
         }, HookMode.Pre);
 
+        // AimHook — PRE-detour on CCSBot::UpdateLookAngles. Defaults to
+        // installed-but-no-override (NaN overrides). Rcon commands
+        // `insanity_aim_hook_*` arm/disarm and set targets. Install failure
+        // is non-fatal — plugin continues without aim override capability.
+        AimHook.Install();
+
         // Hot reload: OnClientPutInServer will not fire for bots that
         // are already on the server, so adopt them now in one pass.
         if (hotReload) {
@@ -161,6 +167,7 @@ public sealed class InsanityRevivePlugin : BasePlugin
 
     public override void Unload(bool hotReload)
     {
+        try { AimHook.Uninstall(); } catch { }
         try { _manager?.Dispose(); } catch { }
         try { _telemetry?.Dispose(); } catch { }
         _manager = null; _telemetry = null;
@@ -469,6 +476,68 @@ public sealed class InsanityRevivePlugin : BasePlugin
     {
         foreach (var line in AimProbe.Status().Split('\n'))
             info.ReplyToCommand($"[probe] {line}");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Aim Hook — PRE-detour on libserver.so:CCSBot::UpdateLookAngles
+    // Writes m_lookPitch/Yaw before bot AI smoother reads them.
+    // ──────────────────────────────────────────────────────────────────
+
+    [ConsoleCommand("insanity_aim_hook_set",
+        "Aim hook: global override (writes m_lookPitch/Yaw on every CCSBot fire)")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 0, usage: "<pitch> <yaw>  |  off  |  status")]
+    public void OnAimHookSet(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (info.ArgCount < 2)
+        {
+            info.ReplyToCommand($"[aimhook] {AimHook.DebugStatus()}");
+            return;
+        }
+        var first = info.GetArg(1).Trim().ToLowerInvariant();
+        if (first is "off" or "clear" or "none")
+        {
+            AimHook.SetGlobalOverride(null, null);
+            info.ReplyToCommand($"[aimhook] override cleared. {AimHook.DebugStatus()}");
+            return;
+        }
+        if (first == "status")
+        {
+            info.ReplyToCommand($"[aimhook] {AimHook.DebugStatus()}");
+            return;
+        }
+        if (info.ArgCount < 3
+            || !float.TryParse(info.GetArg(1),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var pitch)
+            || !float.TryParse(info.GetArg(2),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var yaw))
+        {
+            info.ReplyToCommand("[aimhook] usage: insanity_aim_hook_set <pitch> <yaw> | off | status");
+            return;
+        }
+        pitch = Math.Clamp(pitch, -89f, 89f);
+        AimHook.SetGlobalOverride(pitch, yaw);
+        info.ReplyToCommand($"[aimhook] override set p={pitch:F1} y={yaw:F1}. {AimHook.DebugStatus()}");
+    }
+
+    [ConsoleCommand("insanity_aim_hook_install",
+        "Aim hook: re-install detour after Uninstall (default = installed at plugin load)")]
+    [RequiresPermissions("@css/cheats")]
+    public void OnAimHookInstall(CCSPlayerController? caller, CommandInfo info)
+    {
+        bool ok = AimHook.Install();
+        info.ReplyToCommand($"[aimhook] install={ok} {AimHook.DebugStatus()}");
+    }
+
+    [ConsoleCommand("insanity_aim_hook_uninstall",
+        "Aim hook: tear down detour")]
+    [RequiresPermissions("@css/cheats")]
+    public void OnAimHookUninstall(CCSPlayerController? caller, CommandInfo info)
+    {
+        AimHook.Uninstall();
+        info.ReplyToCommand($"[aimhook] {AimHook.DebugStatus()}");
     }
 
 

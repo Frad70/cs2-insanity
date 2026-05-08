@@ -35,5 +35,13 @@
   },
   "CCSPlayerPawn_OnTakeDamageAlive": {
     "offsets": { "windows": 249, "linux": 250 }
+  },
+  "CCSBot_UpdateLookAngles": {
+    "signatures": {
+      "library": "server",
+      "//": "Per-tick aim driver inside libserver.so. Reads m_lookPitch (CCSBot+0x594C) and m_lookYaw (CCSBot+0x5954), smoothes through internal state into 0x54F0/0x5950/0x5958 (computed angles + look velocities). PRE-hook is the only place where writing m_lookPitch/Yaw is guaranteed to be read this tick — Listeners.OnTick fires post-AI and we lose the race. Linux signature extracted from /home/frad70/cs2-server/game/csgo/bin/linuxsteamrt64/libserver.so 2026-05-08 (BuildID 60c3c87436...). Sig prologue: push rbp; lea rax,[rip+VPROF_GROUP]; lea rsi,[rip+VPROF_COUNTER]; mov rbp,rsp; push r13; lea r13,[rbp-0x40]; push r12; push rbx; mov rdx,r13; mov rbx,rdi. Wildcards = the two RIP-relative literals. Windows sig TBD — use only on linux build until extracted.",
+      "linux": "55 48 8D 05 ? ? ? ? 48 8D 35 ? ? ? ? 48 89 E5 41 55 4C 8D 6D C0 41 54 53 4C 89 EA 48 89 FB",
+      "windows": ""
+    }
   }
 }
