@@ -72,5 +72,16 @@ constexpr size_t POOL_TOTAL = POOL_AIM_OVERRIDE_YAW_OFFSET + 4;  // 4508
 // aim_hook.cpp's pattern + signature comment for full provenance.
 constexpr size_t CCSBOT_LOOK_PITCH_OFFSET = 0x594C;  // float
 constexpr size_t CCSBOT_LOOK_YAW_OFFSET   = 0x5954;  // float
+// CCSBot.m_pPlayer — pointer to the bot's CCSPlayerPawn (from disassembly:
+// `mov 0x8(%rbx), %rax` in UpdateLookAngles loads the player ptr).
+constexpr size_t CCSBOT_PLAYER_PTR_OFFSET = 0x8;     // CCSPlayerPawn*
+// CCSPlayerPawn.m_angEyeAngles — the schema field that AimDiag (2026-05-08)
+// proved IS the actual shoot-direction source: bullet trajectory matched
+// this field within ~1° across 30 logged fires. Plugin-side writes from
+// Listeners.OnTick STUCK server-side but happened AFTER the per-tick shoot
+// trace had already read the value, so they had no effect on bullets.
+// PRE-UpdateLookAngles is earlier in the tick → write here propagates to
+// the shoot trace.
+constexpr size_t PAWN_EYE_ANGLES_OFFSET   = 0x1658;  // QAngle (3 floats)
 
 } // namespace InsanityHider

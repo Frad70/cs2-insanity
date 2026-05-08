@@ -282,8 +282,28 @@ extern "C" void aim_hook_handler(void* ccsbot) {
     float yaw   = pool->GetAimYaw();
 
     auto* base = reinterpret_cast<unsigned char*>(ccsbot);
+
+    // (1) Write m_lookPitch / m_lookYaw on CCSBot. This is what the spec
+    // hypothesised would steer aim. AimDiag (2026-05-08) showed that
+    // m_lookPitch/Yaw is REPORT-only relative to shoot trajectory — bullets
+    // don't follow it. Kept for completeness so future debugging can A/B.
     *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_PITCH_OFFSET) = pitch;
     *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_YAW_OFFSET)   = yaw;
+
+    // (2) Write CCSPlayerPawn.m_angEyeAngles via the player pointer at
+    // CCSBot+0x8. This is the actual shoot-direction source per AimDiag
+    // (bullet trajectory matched m_angEyeAngles within ~1° in 30/30 fires).
+    // PRE-UpdateLookAngles fires BEFORE the per-tick shoot trace reads this
+    // field, so our write should propagate to bullet direction.
+    void* pawn = nullptr;
+    memcpy(&pawn, base + InsanityHider::CCSBOT_PLAYER_PTR_OFFSET, sizeof(pawn));
+    if (pawn) {
+        auto* p = reinterpret_cast<unsigned char*>(pawn);
+        // QAngle = 3 floats: pitch (X), yaw (Y), roll (Z=0).
+        *reinterpret_cast<float*>(p + InsanityHider::PAWN_EYE_ANGLES_OFFSET + 0) = pitch;
+        *reinterpret_cast<float*>(p + InsanityHider::PAWN_EYE_ANGLES_OFFSET + 4) = yaw;
+        // Roll left untouched — original value preserved (humans don't roll).
+    }
 }
 
 }  // namespace InsanityHider
