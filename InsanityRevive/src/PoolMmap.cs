@@ -33,7 +33,7 @@ namespace InsanityRevive;
 public sealed class PoolMmap : IDisposable
 {
     public const uint Magic            = 0x46534E49u;
-    public const uint Version          = 4u;
+    public const uint Version          = 5u;
     public const int  Slots            = 120;
     public const int  HeaderBytes      = 16;
     public const int  ActiveOffset     = 8;
@@ -45,7 +45,12 @@ public sealed class PoolMmap : IDisposable
     public const int  FifoOffset       = NamesOffset + (Slots * NameBytes);   // 3976
     public const int  FifoHeadOffset   = FifoOffset + (FifoCapacity * NameBytes);  // 4488
     public const int  FifoTailOffset   = FifoHeadOffset + 4;                       // 4492
-    public const int  Total            = FifoTailOffset + 4;                       // 4496
+    // v5 aim-override block. CSSharp writes (rcon command sets these);
+    // C++ reads from inside the AimHook PRE-detour.
+    public const int  AimOverrideEnOffset    = FifoTailOffset + 4;             // 4496
+    public const int  AimOverridePitchOffset = AimOverrideEnOffset + 4;        // 4500
+    public const int  AimOverrideYawOffset   = AimOverridePitchOffset + 4;     // 4504
+    public const int  Total            = AimOverrideYawOffset + 4;             // 4508
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _va;
@@ -121,6 +126,35 @@ public sealed class PoolMmap : IDisposable
         for (int i = 0; i < FifoCapacity * NameBytes; i++) _va.Write(FifoOffset + i, (byte)0);
         _va.Write(FifoHeadOffset, 0u);
         _va.Write(FifoTailOffset, 0u);
+    }
+
+    // v5 aim-override block accessors. Single global pair (one pitch/yaw for
+    // all bots in the fleet); per-slot is a future extension. Reads/writes
+    // are non-atomic uint32/float — fine because both sides run on the same
+    // game tick thread.
+    public void WriteAimOverride(bool enabled, float pitch, float yaw)
+    {
+        if (_va == null) return;
+        _va.Write(AimOverridePitchOffset, pitch);
+        _va.Write(AimOverrideYawOffset,   yaw);
+        // Write enable LAST so the C++ reader sees consistent values.
+        Thread.MemoryBarrier();
+        _va.Write(AimOverrideEnOffset, enabled ? 1u : 0u);
+    }
+
+    public void ClearAimOverride()
+    {
+        if (_va == null) return;
+        _va.Write(AimOverrideEnOffset, 0u);
+    }
+
+    public (bool enabled, float pitch, float yaw) ReadAimOverride()
+    {
+        if (_va == null) return (false, 0f, 0f);
+        bool en = _va.ReadUInt32(AimOverrideEnOffset) != 0;
+        float p = _va.ReadSingle(AimOverridePitchOffset);
+        float y = _va.ReadSingle(AimOverrideYawOffset);
+        return (en, p, y);
     }
 
     public void Write(int slot, byte val)

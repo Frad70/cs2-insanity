@@ -72,7 +72,8 @@ LIBS := \
 	$(HL2SDK)/lib/linux64/libtier0.so
 
 # Plugin sources + sourcehook compilation.
-PLUGIN_SRCS := src/plugin.cpp src/pool.cpp
+PLUGIN_SRCS := src/plugin.cpp src/pool.cpp src/aim_hook.cpp
+PLUGIN_ASM_SRCS := src/aim_hook_asm.S
 # sourcehook_hookmangen_x86_64.cpp is INCOMPLETE for Linux x64 in
 # upstream metamod-source — static_assert(false, "Missing registers
 # saving for linux") fires at compile time. We exclude it for now;
@@ -88,7 +89,8 @@ SH_SRCS     := \
 	$(MMSOURCE)/core/sourcehook/sourcehook_impl_cvfnptr.cpp
 
 ALL_SRCS := $(PLUGIN_SRCS) $(SH_SRCS)
-OBJS     := $(patsubst %.cpp,$(OBJDIR)/%.o,$(ALL_SRCS))
+OBJS     := $(patsubst %.cpp,$(OBJDIR)/%.o,$(ALL_SRCS)) \
+            $(patsubst %.S,$(OBJDIR)/%.o,$(PLUGIN_ASM_SRCS))
 
 all: $(TARGET)
 
@@ -105,6 +107,10 @@ $(TARGET): $(PROTO_OUT) $(OBJS) | $(BUILD)
 $(OBJDIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/%.o: %.S
+	@mkdir -p $(dir $@)
+	$(CXX) -c $< -o $@
 
 $(BUILD):
 	@mkdir -p $@
