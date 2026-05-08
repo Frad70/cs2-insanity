@@ -56,6 +56,18 @@ public sealed class InsanityRevivePlugin : BasePlugin
                 var isBot = victim.IsBot
                     || (_manager?.FindBySlot((int)victim.Slot) != null);
                 _manager?.Reveal.OnPlayerDeath((int)victim.Slot, isBot);
+
+                // BotProfile dynamic-state notify: tilt the victim if it's
+                // a managed bot, reward the attacker if it's also a bot.
+                // Modules reading CurrentAimSkill / CurrentReactionMs see
+                // the resulting drift in following ticks.
+                var victimFc = _manager?.FindBySlot((int)victim.Slot);
+                victimFc?.Profile.NotifyEvent("Death");
+                var attacker = @event.Attacker;
+                if (attacker != null && attacker.IsValid && attacker.Slot != victim.Slot) {
+                    var attackerFc = _manager?.FindBySlot((int)attacker.Slot);
+                    attackerFc?.Profile.NotifyEvent("Kill");
+                }
             } catch (Exception ex) { Log.Debug($"EventPlayerDeath dispatch: {ex.Message}"); }
             return HookResult.Continue;
         });
@@ -203,7 +215,8 @@ public sealed class InsanityRevivePlugin : BasePlugin
             } catch { }
             info.ReplyToCommand($"  #{fc.Id} target={fc.Name} schemaName={schemaName} slot={fc.Slot} " +
                                 $"ping={fc.PingView.LastWrittenPing}ms " +
-                                $"profile=base{fc.Profile.BaseLatencyMs}/jit{fc.Profile.JitterRangeMs}");
+                                $"net={fc.Network.Type} arch={fc.Profile.Archetype} skill={fc.Profile.SkillRating} " +
+                                $"mood={fc.Profile.Mood} tilt={fc.Profile.Tilt}");
         }
         info.ReplyToCommand($"[Insanity] hider active={_manager.IsHiderActive()}");
     }
@@ -283,6 +296,34 @@ public sealed class InsanityRevivePlugin : BasePlugin
         var arg = info.ArgCount > 1 ? info.GetArg(1).Trim().ToLowerInvariant() : "arm";
         var msg = arg == "disarm" ? Probe.HurtZeroDisarm(_manager) : Probe.HurtZeroArmOnce(_manager);
         info.ReplyToCommand($"[probe] {msg}");
+    }
+
+
+
+    // ──────────────────────────────────────────────────────────────────
+    // BotProfile inspection (the umbrella structure introduced 2026-05-08)
+    // ──────────────────────────────────────────────────────────────────
+
+    [ConsoleCommand("insanity_profile", "Print full BotProfile dump for a bot")]
+    [ConsoleCommand("css_profile", "Print BotProfile (chat: !profile <slot>)")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 1, usage: "<slot>")]
+    public void OnProfile(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        if (!int.TryParse(info.GetArg(1), out var slot)) {
+            info.ReplyToCommand("[Insanity] usage: insanity_profile <slot>");
+            return;
+        }
+        var fc = _manager.FindBySlot(slot);
+        if (fc == null) {
+            info.ReplyToCommand($"[Insanity] no managed bot at slot {slot}");
+            return;
+        }
+        info.ReplyToCommand($"[Insanity] BotProfile for #{fc.Id} {fc.Name} (slot={slot}):");
+        foreach (var line in fc.Profile.DebugDump().Split('\n'))
+            info.ReplyToCommand(line);
+        info.ReplyToCommand($"  simulator:    {fc.Simulator.DebugStateString()}");
     }
 
     [ConsoleCommand("insanity_hider_active", "Toggle InsanityHider BOT-icon hiding (0/1)")]
