@@ -1,0 +1,85 @@
+# GitHub Actions CI for cs2-insanity.
+#
+# Triggers on every push to main + every PR. Goal: catch compile-fails
+# before they hit deploy. Does NOT actually deploy — that's manual via
+# scripts/deploy.sh against the live server.
+#
+# CSSharp.API.dll is fetched from the upstream release matching the
+# version in our README — keeps CI builds reproducible without vendoring
+# the dll into git.
+#
+# Build only the CSSharp side (C# / .NET). The C++ Metamod plugin
+# (InsanityHider) needs hl2sdk-cs2 which is a private Valve SDK and not
+# CI-friendly — that side is built locally on the live server box.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-cssharp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Fetch CounterStrikeSharp.API.dll (v1.0.367, with-runtime)
+        run: |
+          mkdir -p .ci/cssharp-api
+          curl -fsSL -o /tmp/cssharp.zip \
+            https://github.com/roflmuffin/CounterStrikeSharp/releases/download/v1.0.367/counterstrikesharp-with-runtime-build-367-linux-3a0bd2c.zip
+          unzip -o -q /tmp/cssharp.zip -d /tmp/cssharp/
+          # Locate the API dll regardless of zip layout depth.
+          api_dll=$(find /tmp/cssharp -name 'CounterStrikeSharp.API.dll' | head -1)
+          [ -n "$api_dll" ] || { echo "API dll not found in zip" >&2; exit 1; }
+          cp "$api_dll" .ci/cssharp-api/CounterStrikeSharp.API.dll
+
+      - name: Override HintPath for CI build
+        run: |
+          # Repoint the project's HintPath at the CI-fetched API dll so
+          # we don't depend on /mnt/storage/cs2-server/... existing on
+          # the runner.
+          ci_path="${{ github.workspace }}/.ci/cssharp-api/CounterStrikeSharp.API.dll"
+          sed -i "s|/mnt/storage/cs2-server/game/csgo/addons/counterstrikesharp/api/CounterStrikeSharp.API.dll|${ci_path}|g" \
+              InsanityRevive/InsanityRevive.csproj
+
+      - name: dotnet restore
+        run: dotnet restore InsanityRevive/InsanityRevive.csproj
+
+      - name: dotnet build (Release, warnings-as-errors)
+        run: |
+          dotnet build InsanityRevive/InsanityRevive.csproj \
+            -c Release \
+            --no-restore \
+            -warnaserror \
+            --nologo
+
+      - name: Compute and surface DLL sha256
+        run: |
+          dll=InsanityRevive/bin/Release/net8.0/InsanityRevive.dll
+          [ -f "$dll" ] || { echo "DLL missing post-build" >&2; exit 1; }
+          sha=$(sha256sum "$dll" | awk '{print $1}')
+          echo "DLL sha256: $sha"
+          echo "DLL_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InsanityRevive-${{ github.sha }}
+          path: |
+            InsanityRevive/bin/Release/net8.0/InsanityRevive.dll
+            InsanityRevive/bin/Release/net8.0/InsanityRevive.pdb
+          retention-days: 14
