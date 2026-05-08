@@ -142,6 +142,27 @@ void Pool::WriteMapchangeFlag(bool inProgress) {
     p->store(inProgress ? 1u : 0u, std::memory_order_release);
 }
 
+bool Pool::IsAimOverrideEnabled() const {
+    if (!m_pBase) return false;
+    auto* p = reinterpret_cast<const uint32_t*>(
+        reinterpret_cast<const uint8_t*>(m_pBase) + POOL_AIM_OVERRIDE_EN_OFFSET);
+    return *p != 0;
+}
+
+float Pool::GetAimPitch() const {
+    if (!m_pBase) return 0.0f;
+    float v = 0.0f;
+    memcpy(&v, reinterpret_cast<const uint8_t*>(m_pBase) + POOL_AIM_OVERRIDE_PITCH_OFFSET, sizeof(v));
+    return v;
+}
+
+float Pool::GetAimYaw() const {
+    if (!m_pBase) return 0.0f;
+    float v = 0.0f;
+    memcpy(&v, reinterpret_cast<const uint8_t*>(m_pBase) + POOL_AIM_OVERRIDE_YAW_OFFSET, sizeof(v));
+    return v;
+}
+
 bool Pool::PopFifo(char* outBuf, size_t outBufBytes) {
     if (!m_pBase || !outBuf || outBufBytes == 0) return false;
     auto* base = reinterpret_cast<uint8_t*>(m_pBase);

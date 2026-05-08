@@ -117,6 +117,10 @@ public sealed class FakeClientManager : IDisposable
     /// <summary>FleetManager-friendly accessors (v0.6.0+).</summary>
     public int PendingPersonaCount => _pendingPersonaIds.Count;
     public bool IsMapchangeInProgress => _pool.IsMapchangeInProgress();
+    /// <summary>Direct access to the shared mmap pool — used by AimHook.cs
+    /// to write override values that the C++ InsanityHider reads on each
+    /// CCSBot::UpdateLookAngles fire.</summary>
+    public PoolMmap GetPool() => _pool;
     public FleetManager Fleet { get; private set; } = null!;
     public RevealController Reveal { get; private set; } = null!;
     public BotDamagePatch DamagePatch { get; private set; } = null!;

@@ -1,34 +1,39 @@
 // Shared layout for /tmp/insanityrevive_fake_slots.bin.
 //
-// Layout v4:
+// Layout v5 (was v4 with aim-override block appended):
 //   [   0..   3]  uint32 magic          = 'INSF' = 0x46534E49
-//   [   4..   7]  uint32 version        = 4
+//   [   4..   7]  uint32 version        = 5
 //   [   8..  11]  uint32 activeFlag     = kill-switch (0/1) — hider on/off
 //   [  12..  15]  uint32 mapchangeFlag  = mapchange in progress (0/1)
-//                                         C++ sets at OnLevelShutdown,
-//                                         CSSharp clears at OnMapStart
 //   [  16.. 135]  uint8 managed[120]    = per-slot management bit
 //   [ 136..3975]  char names[120][32]   = per-slot persona name (null-terminated)
 //   [3976..4487]  char fifoBuf[16][32]  = SPSC ring buffer of pending personas
-//                                         CSSharp pushes (advances head),
-//                                         C++ pops (advances tail).
 //   [4488..4491]  uint32 fifoHead       = CSSharp writes
 //   [4492..4495]  uint32 fifoTail       = C++ writes
-// Total = 4496 bytes.
+//   [4496..4499]  uint32 aimOverrideEn  = global aim-override enabled (0/1)
+//   [4500..4503]  float  aimOverridePitch
+//   [4504..4507]  float  aimOverrideYaw
+// Total = 4508 bytes.
+//
+// AIM OVERRIDE block (v5, 2026-05-08):
+//   GLOBAL toggle that the C++ AimHook reads inside CCSBot::UpdateLookAngles
+//   PRE-detour. When enabled, every CCSBot's m_lookPitch/m_lookYaw is forced
+//   to (aimOverridePitch, aimOverrideYaw) before the engine smoother runs.
+//   Per-slot override is a future extension — this v1 is a single global pair
+//   for the diagnostic "does the hook actually steer aim?" probe.
+//
+//   CSSharp WRITES; C++ READS. No race: CSSharp updates these fields from a
+//   single rcon command handler on the game tick thread, the C++ side reads
+//   them on the same thread (UpdateLookAngles runs in CCSBot::Upkeep which
+//   runs from the per-tick AI subsystem on the same main thread).
 //
 // FIFO is single-producer / single-consumer. Counters increment monotonically;
 // slot index = counter % capacity. Empty when head == tail. Overflow when
 // head - tail >= capacity (don't push more than capacity-1 outstanding).
 //
-// activeFlag and mapchangeFlag are SEPARATE 4-byte words so that toggling
-// either side never clobbers the other. C++ writes mapchangeFlag (one shot
-// at level shutdown), CSSharp writes activeFlag (kill-switch console cmd)
-// and clears mapchangeFlag at OnMapStart. No bit-packing race.
-//
-// v3 → v4 is a BREAKING bump: offset of managed[] and everything after
-// shifted by +4. Old v3 pool files MUST be deleted before deploy of v4
-// binaries. C++ Open() fails on version mismatch; CSSharp Open() reinits
-// on mismatch — but starting from a deleted file is the cleanest path.
+// v4 → v5 is a NON-BREAKING extension: existing fields unchanged, new fields
+// appended after FIFO tail. v4 readers see truncated file = old layout. v5
+// pool files starting from a fresh /tmp file (auto-recreated by both sides).
 
 #pragma once
 
@@ -38,7 +43,7 @@
 namespace InsanityHider {
 
 constexpr uint32_t POOL_MAGIC   = 0x46534E49u;
-constexpr uint32_t POOL_VERSION = 4u;
+constexpr uint32_t POOL_VERSION = 5u;
 constexpr size_t   POOL_SLOTS   = 120;
 
 constexpr size_t POOL_HEADER_BYTES     = 16;
@@ -54,6 +59,18 @@ constexpr size_t POOL_FIFO_BYTES       = POOL_FIFO_CAPACITY * POOL_NAME_BYTES;  
 constexpr size_t POOL_FIFO_HEAD_OFFSET = POOL_FIFO_OFFSET + POOL_FIFO_BYTES;                 // 4488
 constexpr size_t POOL_FIFO_TAIL_OFFSET = POOL_FIFO_HEAD_OFFSET + 4;                          // 4492
 
-constexpr size_t POOL_TOTAL = POOL_FIFO_TAIL_OFFSET + 4;  // 4496
+// v5 aim-override block.
+constexpr size_t POOL_AIM_OVERRIDE_EN_OFFSET    = POOL_FIFO_TAIL_OFFSET + 4;  // 4496
+constexpr size_t POOL_AIM_OVERRIDE_PITCH_OFFSET = POOL_AIM_OVERRIDE_EN_OFFSET + 4;  // 4500
+constexpr size_t POOL_AIM_OVERRIDE_YAW_OFFSET   = POOL_AIM_OVERRIDE_PITCH_OFFSET + 4;  // 4504
+
+constexpr size_t POOL_TOTAL = POOL_AIM_OVERRIDE_YAW_OFFSET + 4;  // 4508
+
+// CCSBot field offsets (libserver.so 2026-05-08, BuildID 60c3c87436...).
+// Used by aim_hook.cpp to write override values into the bot AI struct.
+// Discovered via disassembly of CCSBot::UpdateLookAngles @ 0xb41c40 — see
+// aim_hook.cpp's pattern + signature comment for full provenance.
+constexpr size_t CCSBOT_LOOK_PITCH_OFFSET = 0x594C;  // float
+constexpr size_t CCSBOT_LOOK_YAW_OFFSET   = 0x5954;  // float
 
 } // namespace InsanityHider

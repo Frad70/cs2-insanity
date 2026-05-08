@@ -25,6 +25,13 @@ public:
     bool RevalidateHeader() const;
     const char* GetName(int slot) const;
 
+    // v5 aim-override block. CSSharp WRITES; C++ READS in the AimHook
+    // PRE-detour. Single global pair for now; per-slot is a future
+    // extension. See pool_format.h for the byte layout.
+    bool  IsAimOverrideEnabled() const;
+    float GetAimPitch() const;
+    float GetAimYaw() const;
+
     // Writes (writable mmap, v3+).
     void WriteManaged(int slot, uint8_t val);
     void WriteName(int slot, const char* name);

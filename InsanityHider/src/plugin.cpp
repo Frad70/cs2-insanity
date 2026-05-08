@@ -15,6 +15,7 @@
 // Pool layout shared with CSSharp: see src/pool_format.h.
 
 #include "plugin.h"
+#include "aim_hook.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -417,10 +418,23 @@ bool InsanityHiderPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
 
     META_CONPRINTF("[InsanityHider] loaded — m_bFakePlayer offset=%d, kill-switch via pool[%zu]\n",
                    kFakePlayerOffset, InsanityHider::POOL_ACTIVE_OFFSET);
+
+    // AimHook — minimal inline detour on libserver.so:CCSBot::UpdateLookAngles.
+    // Install() pattern-scans the libserver .text segment, mprotects the
+    // function page R/W/X, writes a 5-byte JMP to our naked entry stub, and
+    // builds a nearby trampoline. Failures are logged but non-fatal — the
+    // hider half of the plugin runs fine without aim hooking. See aim_hook.h
+    // for the full design rationale.
+    if (!InsanityHider::g_AimHook.Install()) {
+        META_CONPRINTF("[InsanityHider] AimHook install failed — aim override disabled "
+                       "(hider unaffected)\n");
+    }
+
     return true;
 }
 
 bool InsanityHiderPlugin::Unload(char* error, size_t maxlen) {
+    InsanityHider::g_AimHook.Uninstall();
     SH_REMOVE_HOOK(IServerGameClients, OnClientConnected, gameclients,
                    SH_MEMBER(this, &InsanityHiderPlugin::Hook_OnClientConnected_Post), true);
     SH_REMOVE_HOOK(IServerGameClients, ClientPutInServer, gameclients,
