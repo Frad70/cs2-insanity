@@ -1,16 +1,19 @@
 # GitHub Actions CI for cs2-insanity.
 #
-# Triggers on every push to main + every PR. Goal: catch compile-fails
-# before they hit deploy. Does NOT actually deploy — that's manual via
-# scripts/deploy.sh against the live server.
+# Triggers on every push to main + every PR + every v*-tag. Goal: catch
+# compile-fails on both halves of the stack before they hit the live server.
+# Does NOT actually deploy — that's still manual via scripts/deploy.sh.
 #
-# CSSharp.API.dll is fetched from the upstream release matching the
-# version in our README — keeps CI builds reproducible without vendoring
-# the dll into git.
+# Two parallel build jobs:
+#   build-cssharp  — InsanityRevive (C# / .NET 8 / CSSharp)
+#   build-hider    — InsanityHider (C++ / Metamod:Source / CS2 SDK)
 #
-# Build only the CSSharp side (C# / .NET). The C++ Metamod plugin
-# (InsanityHider) needs hl2sdk-cs2 which is a private Valve SDK and not
-# CI-friendly — that side is built locally on the live server box.
+# A `package` job runs on tag pushes only and assembles a single tarball
+# with both halves laid out in their server-relative paths.
+#
+# CounterStrikeSharp.API.dll is fetched from the upstream release pinned
+# in CSSHARP_VERSION below. hl2sdk and metamod-source are cloned shallow
+# from upstream (cs2 / master) at build time — both are public.
 
 name: build
 
@@ -20,12 +23,21 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CSSHARP_VERSION: "1.0.367"
+  HL2SDK_REPO: "https://github.com/alliedmodders/hl2sdk.git"
+  HL2SDK_BRANCH: "cs2"
+  MMSOURCE_REPO: "https://github.com/alliedmodders/metamod-source.git"
+  MMSOURCE_BRANCH: "master"
+
 jobs:
   build-cssharp:
+    name: InsanityRevive (.NET / CSSharp)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -36,25 +48,15 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Fetch CounterStrikeSharp.API.dll (v1.0.367, with-runtime)
+      - name: Fetch CounterStrikeSharp.API.dll (v${{ env.CSSHARP_VERSION }})
         run: |
           mkdir -p .ci/cssharp-api
-          curl -fsSL -o /tmp/cssharp.zip \
-            https://github.com/roflmuffin/CounterStrikeSharp/releases/download/v1.0.367/counterstrikesharp-with-runtime-build-367-linux-3a0bd2c.zip
+          url="https://github.com/roflmuffin/CounterStrikeSharp/releases/download/v${CSSHARP_VERSION}/counterstrikesharp-linux-${CSSHARP_VERSION}.zip"
+          curl -fsSL --retry 4 --retry-delay 4 -o /tmp/cssharp.zip "$url"
           unzip -o -q /tmp/cssharp.zip -d /tmp/cssharp/
-          # Locate the API dll regardless of zip layout depth.
           api_dll=$(find /tmp/cssharp -name 'CounterStrikeSharp.API.dll' | head -1)
           [ -n "$api_dll" ] || { echo "API dll not found in zip" >&2; exit 1; }
           cp "$api_dll" .ci/cssharp-api/CounterStrikeSharp.API.dll
-
-      - name: Override HintPath for CI build
-        run: |
-          # Repoint the project's HintPath at the CI-fetched API dll so
-          # we don't depend on /mnt/storage/cs2-server/... existing on
-          # the runner.
-          ci_path="${{ github.workspace }}/.ci/cssharp-api/CounterStrikeSharp.API.dll"
-          sed -i "s|/mnt/storage/cs2-server/game/csgo/addons/counterstrikesharp/api/CounterStrikeSharp.API.dll|${ci_path}|g" \
-              InsanityRevive/InsanityRevive.csproj
 
       - name: dotnet restore
         run: dotnet restore InsanityRevive/InsanityRevive.csproj
@@ -65,7 +67,8 @@ jobs:
             -c Release \
             --no-restore \
             -warnaserror \
-            --nologo
+            --nologo \
+            -p:CSSharpApiPath="${{ github.workspace }}/.ci/cssharp-api/CounterStrikeSharp.API.dll"
 
       - name: Compute and surface DLL sha256
         run: |
@@ -75,11 +78,123 @@ jobs:
           echo "DLL sha256: $sha"
           echo "DLL_SHA256=$sha" >> "$GITHUB_ENV"
 
-      - name: Upload DLL artifact
+      - name: Upload InsanityRevive artifact
         uses: actions/upload-artifact@v4
         with:
           name: InsanityRevive-${{ github.sha }}
           path: |
             InsanityRevive/bin/Release/net8.0/InsanityRevive.dll
             InsanityRevive/bin/Release/net8.0/InsanityRevive.pdb
+            InsanityRevive/cfg/**
+            InsanityRevive/gamedata/**
           retention-days: 14
+
+  build-hider:
+    name: InsanityHider (C++ / Metamod / CS2 SDK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make
+
+      - name: Vendor hl2sdk (${{ env.HL2SDK_BRANCH }} branch)
+        run: |
+          git clone --depth 1 --branch "$HL2SDK_BRANCH" \
+            "$HL2SDK_REPO" InsanityHider/hl2sdk
+          # protoc shipped in-tree must be executable.
+          chmod +x InsanityHider/hl2sdk/devtools/bin/linux/protoc || true
+
+      - name: Vendor metamod-source (${{ env.MMSOURCE_BRANCH }} branch)
+        run: |
+          git clone --depth 1 --branch "$MMSOURCE_BRANCH" \
+            "$MMSOURCE_REPO" InsanityHider/mmsource
+
+      - name: make
+        working-directory: InsanityHider
+        run: |
+          make -j"$(nproc)"
+
+      - name: Compute and surface .so sha256
+        run: |
+          so=InsanityHider/build/insanityhider.so
+          [ -f "$so" ] || { echo ".so missing post-build" >&2; exit 1; }
+          sha=$(sha256sum "$so" | awk '{print $1}')
+          echo "SO sha256: $sha"
+          echo "SO_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Upload InsanityHider artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InsanityHider-${{ github.sha }}
+          path: |
+            InsanityHider/build/insanityhider.so
+            InsanityHider/insanityhider.vdf
+          retention-days: 14
+
+  package:
+    name: package release bundle
+    runs-on: ubuntu-latest
+    needs: [build-cssharp, build-hider]
+    if: startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download InsanityRevive artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: InsanityRevive-${{ github.sha }}
+          path: out/cssharp
+
+      - name: Download InsanityHider artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: InsanityHider-${{ github.sha }}
+          path: out/hider
+
+      - name: Stage server-relative tree
+        run: |
+          set -eu
+          tag=${GITHUB_REF##*/}
+          root=stage/cs2-insanity-${tag}
+
+          # upload-artifact@v4 strips the LCD path prefix from uploads, so:
+          #   out/cssharp/bin/Release/net8.0/InsanityRevive.dll
+          #   out/cssharp/cfg/, out/cssharp/gamedata/
+          #   out/hider/build/insanityhider.so
+          #   out/hider/insanityhider.vdf
+
+          # CSSharp side: csgo/addons/counterstrikesharp/plugins/InsanityRevive/
+          plug_dir=$root/csgo/addons/counterstrikesharp/plugins/InsanityRevive
+          mkdir -p "$plug_dir"
+          cp out/cssharp/bin/Release/net8.0/InsanityRevive.dll "$plug_dir/"
+          cp out/cssharp/bin/Release/net8.0/InsanityRevive.pdb "$plug_dir/" || true
+          cp -r out/cssharp/cfg "$plug_dir/"
+          cp -r out/cssharp/gamedata "$plug_dir/"
+
+          # Metamod side: csgo/addons/metamod/{bin/linuxsteamrt64,*.vdf}
+          mm_bin=$root/csgo/addons/metamod/bin/linuxsteamrt64
+          mm_dir=$root/csgo/addons/metamod
+          mkdir -p "$mm_bin" "$mm_dir"
+          cp out/hider/build/insanityhider.so "$mm_bin/"
+          cp out/hider/insanityhider.vdf "$mm_dir/"
+
+      - name: Tarball + sha256
+        run: |
+          tag=${GITHUB_REF##*/}
+          tar -czf "cs2-insanity-${tag}.tar.gz" -C stage "cs2-insanity-${tag}"
+          sha256sum "cs2-insanity-${tag}.tar.gz" | tee "cs2-insanity-${tag}.tar.gz.sha256"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs2-insanity-${{ github.ref_name }}
+          path: |
+            cs2-insanity-*.tar.gz
+            cs2-insanity-*.tar.gz.sha256
+          retention-days: 90
