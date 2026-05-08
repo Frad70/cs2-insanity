@@ -51,7 +51,7 @@ public sealed class PingDisplay
         try
         {
             controller.Ping = (uint)avg;
-            Utilities.SetStateChanged(controller, "CCSPlayerController", "m_iPing", 0);
+            SchemaSafety.MarkChanged(controller, "CCSPlayerController", "m_iPing", 0);
             // m_flSmoothedPing exists in schema but is server-side only
             // (CSSharp warns "not networked"), so writing it has no
             // visible effect — left out to avoid spamming the log.

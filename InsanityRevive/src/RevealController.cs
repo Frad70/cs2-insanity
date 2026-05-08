@@ -534,9 +534,8 @@ public sealed class RevealController
             // in 3 sec. 2.0× makes 80 HU close gap in ~0.4s, harder to
             // pre-fire all of them. Tunable; if "too easy" persists, raise
             // to 2.5 or shorten SwarmOffsetDistance.
-            Schema.SetSchemaValue<float>(pawn.Handle, "CCSPlayerPawn",
+            SchemaSafety.WriteAndMark<float>(pawn, pawn.Handle, "CCSPlayerPawn",
                 "m_flVelocityModifier", 2.0f);
-            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_flVelocityModifier");
 
             // ARMOR REVERTED v0.6.0.11: my v0.6.0.9 attempt to write
             // m_ArmorValue + m_bHasHelmet via Schema.SetSchemaValue +
@@ -729,9 +728,8 @@ public sealed class RevealController
             c.GiveNamedItem("weapon_glock");
 
             // Reset speed multiplier.
-            Schema.SetSchemaValue<float>(pawn.Handle, "CCSPlayerPawn",
+            SchemaSafety.WriteAndMark<float>(pawn, pawn.Handle, "CCSPlayerPawn",
                 "m_flVelocityModifier", 1.0f);
-            Utilities.SetStateChanged(pawn, "CCSPlayerPawn", "m_flVelocityModifier");
         } catch (Exception ex) { Log.Error($"RestoreNormalLoadout slot={fc.Slot}: {ex.Message}"); }
     }
 

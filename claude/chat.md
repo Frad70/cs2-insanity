@@ -307,3 +307,37 @@ Build: 0 warnings (the two CS0618 disappeared as expected). Smoke: hot-reloaded 
 - DLL: `25a6bfa366b247e04f9f40781cf33c698f068ecb9ea17688fb0497d7a103a70f`
 
 — agent autonomous-session-step2
+
+---
+
+## 2026-05-08 14:01 — agent autonomous-session-step3 (Opus 4.7 1M, xhigh effort)
+
+**Build coming, hash `9845739c6c709cecd477537b9579f7b22d8ea3c7a6333a194dc445989cc5e08f`, files: SchemaSafety.cs (new), FakeClient.cs, PingDisplay.cs, RevealController.cs.**
+
+**Step 3 — SchemaSafety.cs guard rail.**
+
+NEW file `InsanityRevive/src/SchemaSafety.cs`. Centralizes every dynamic Schema write in the codebase and gates them through a deny-list of fields known to crash the server when SetStateChanged'd. Top of the file is a documented incident log — v0.6.0.6 m_iTeamNum, parallel m_angEyeAngles, v0.6.0.9 m_bHasHelmet, v0.6.0.11 m_ArmorValue. Each entry says what crashed AND what the fix path is (use SwitchTeam, use GiveNamedItem("item_assaultsuit"), etc).
+
+Three primitives:
+- `Write<T>(handle, class, field, value)` — wraps `Schema.SetSchemaValue<T>`.
+- `MarkChanged(entity, class, field [, extraOffset])` — wraps `Utilities.SetStateChanged`.
+- `WriteAndMark<T>(entity, handle, class, field, value)` — convenience for the common pair.
+
+All three early-return false (and log a `REFUSED` error line) on deny-list match. Future schema writes by anyone in this project go through these; direct `Schema.SetSchemaValue<>` / `Utilities.SetStateChanged()` calls do not appear elsewhere in the codebase (verified by grep post-migration).
+
+Migrated call sites:
+- `FakeClient.OverwriteNameOnController` — m_iszPlayerName.
+- `PingDisplay.MaybeWrite` — m_iPing.
+- `RevealController.ApplyKnifeRush` — m_flVelocityModifier (set 2.0).
+- `RevealController.RestoreNormalLoadout` — m_flVelocityModifier (reset 1.0).
+
+All four are proven-safe fields (listed in the SchemaSafety preamble). Behavior unchanged; the migration adds a try/catch envelope and the deny-list short-circuit.
+
+Build: 0 warnings, 0 errors. Hot-reload: plugin loaded, no REFUSED log lines (expected — none of the migrated fields are denied). Note: server has accumulated bot-slot fragmentation from multiple hot-reloads in this session — not introduced by step 3, just visible in `insanity_status` output. Will resolve via server restart before step 5 live testing.
+
+**Файлы тронуты:** `SchemaSafety.cs` (new, ~180 lines incl. incident log), `FakeClient.cs` (1 line), `PingDisplay.cs` (1 line), `RevealController.cs` (~6 lines, two pairs collapsed).
+
+**Sha256 baseline после step 3:**
+- DLL: `9845739c6c709cecd477537b9579f7b22d8ea3c7a6333a194dc445989cc5e08f`
+
+— agent autonomous-session-step3
