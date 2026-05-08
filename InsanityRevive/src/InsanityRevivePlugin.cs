@@ -78,6 +78,20 @@ public sealed class InsanityRevivePlugin : BasePlugin
             return HookResult.Continue;
         });
 
+        // AimDiag: capture the bot's view-angle snapshots at fire time and
+        // diff against actual bullet trajectory at impact. Off by default;
+        // arm via insanity_aim_diag.
+        RegisterEventHandler<EventWeaponFire>((@event, info) => {
+            try { AimDiag.OnWeaponFire(@event.Userid); }
+            catch (Exception ex) { Log.Debug($"AimDiag.OnWeaponFire: {ex.Message}"); }
+            return HookResult.Continue;
+        });
+        RegisterEventHandler<EventBulletImpact>((@event, info) => {
+            try { AimDiag.OnBulletImpact(@event.Userid, @event.X, @event.Y, @event.Z); }
+            catch (Exception ex) { Log.Debug($"AimDiag.OnBulletImpact: {ex.Message}"); }
+            return HookResult.Continue;
+        });
+
         // BotProfile complacency mechanic (2026-05-08): on round end,
         // compute observed-skill team averages and dispatch RoundEnd
         // events with skill-gap data to each managed bot. Bot's own
@@ -479,6 +493,19 @@ public sealed class InsanityRevivePlugin : BasePlugin
     // Aim Hook — PRE-detour on libserver.so:CCSBot::UpdateLookAngles
     // Writes m_lookPitch/Yaw before bot AI smoother reads them.
     // ──────────────────────────────────────────────────────────────────
+
+    [ConsoleCommand("insanity_aim_diag",
+        "Aim diagnostic: log shooter's angle fields vs actual bullet trajectory")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 0, usage: "[on|off] [budget=30]")]
+    public void OnAimDiag(CCSPlayerController? caller, CommandInfo info)
+    {
+        bool on = info.ArgCount < 2 || info.GetArg(1).Trim().ToLowerInvariant() != "off";
+        int budget = 30;
+        if (info.ArgCount >= 3 && int.TryParse(info.GetArg(2), out var b)) budget = Math.Clamp(b, 1, 500);
+        AimDiag.SetEnabled(on, budget);
+        info.ReplyToCommand($"[aimdiag] enabled={on} budget={AimDiag.LogsRemaining}");
+    }
 
     [ConsoleCommand("insanity_aim_hook_set",
         "Aim override (global): writes pool fields read by InsanityHider C++ PRE-detour on CCSBot::UpdateLookAngles")]
