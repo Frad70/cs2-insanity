@@ -341,3 +341,34 @@ Build: 0 warnings, 0 errors. Hot-reload: plugin loaded, no REFUSED log lines (ex
 - DLL: `9845739c6c709cecd477537b9579f7b22d8ea3c7a6333a194dc445989cc5e08f`
 
 — agent autonomous-session-step3
+
+---
+
+## 2026-05-08 14:08 — agent autonomous-session-step4 (Opus 4.7 1M, xhigh effort)
+
+**Build coming, hash `7074f29a3238440a4158e11d69a32aa5d39d9f447bf89e75d38e265ff5b18861`, files: Probe.cs (new), InsanityRevivePlugin.cs (3 commands), notes/stage_4_probes.md (new).**
+
+**Step 4 — Stage 4 probes (code only; live verification deferred — user away).**
+
+NEW file `InsanityRevive/src/Probe.cs` with three static probe methods. Each is exposed via a `[ConsoleCommand("insanity_probe_*")]` handler in `InsanityRevivePlugin.cs`, gated `@css/cheats`. Each probe is **isolated** — running it has no effect on production code paths.
+
+Probes:
+- `insanity_probe_glow <slot> [r g b]` — `pawn.Render = Color` + `SchemaSafety.MarkChanged("CBaseModelEntity", "m_clrRender")`. Default red. User reports back: did the bot tint?
+- `insanity_probe_c4 <slot>` — `c.GiveNamedItem("weapon_c4")`. User reports: model in hand? PLANT marker on radar? auto-revoke on CT side?
+- `insanity_probe_hurtzero [arm|disarm]` — toggles the production `BotDamagePatch` (the `Listeners.OnEntityTakeDamagePre` filter from step 2) for isolated verification.
+
+**Smoke verification done in this session:**
+- All three commands register (rcon returns usage hints / executes).
+- `insanity_probe_hurtzero arm` actually installed the listener — server.log shows `[Insanity][INFO] BotDamagePatch installed (Listeners.OnEntityTakeDamagePre)` — proves step 2's port wired correctly. Disarmed cleanly.
+- `_glow` and `_c4` not run live (would need a connected client to visually verify; user explicitly away).
+
+NEW `notes/stage_4_probes.md` — companion to `stage_3_4_probes.md`. Each probe section has expected outcomes (🟢/🟡/🔴), fallback paths, and a placeholder for live results filled in by next user-facing session. Status currently ⚪ PENDING for probes 1+2; probe 3 partially verified via the install/uninstall toggle smoke above.
+
+**Discipline note:** session plan said "ИЗОЛИРОВАН — если probe красный, лог и stop, не пытайся fix на месте". Live probes 1+2 deferred to user-driven session. Step 5 (Stage 4 implementation) below proceeds with conservative fallbacks **pre-baked in the code** — if probe 1 turns 🔴, Stage 4 simply skips the red tint without further changes; if probe 2 turns 🔴, Stage 4 falls back to invisible-C4 + env_explosion-on-death which is documented in stage_3_4_probes.md.
+
+**Files touched:** `Probe.cs` (new), `InsanityRevivePlugin.cs` (~50 lines, 3 command handlers), `notes/stage_4_probes.md` (new).
+
+**Sha256 baseline после step 4:**
+- DLL: `7074f29a3238440a4158e11d69a32aa5d39d9f447bf89e75d38e265ff5b18861`
+
+— agent autonomous-session-step4
