@@ -80,7 +80,15 @@ public static class AimProbe
         public float Roll;    // Z — usually 0
     }
 
-    public enum Method { VAngle, EyeAngles, Teleport }
+    public enum Method
+    {
+        VAngle,         // Schema.GetSchemaOffset("CCSPlayerPawn", "v_angle") — field unknown (returns 0).
+        EyeAngles,      // raw write to CCSPlayerPawn.m_angEyeAngles. STICKS server-side, but bot AI ignores it for shoot trace.
+        Teleport,       // pawn.Teleport(origin, qAngle, velocity) — rotates the WHOLE body (incl. up-vector); bot becomes prone.
+        Stash,          // raw write to CCSPlayerPawn.m_angStashedShootAngles. Untested.
+        Look,           // raw write to CCSBot.m_lookPitch (X) + m_lookYaw (Y). Per strings dump these are bot AI's COMMANDED look direction
+                        // — the BT writes these before driving aim. Most promising.
+    }
 
     private struct Pin
     {
@@ -254,6 +262,18 @@ public static class AimProbe
                         writeNote = $"Teleport threw: {ex.GetType().Name}: {ex.Message}";
                     }
                     break;
+                case Method.Stash:
+                    wrote = WriteRawAngle(pawn.Handle, "CCSPlayerPawn", "m_angStashedShootAngles",
+                                          p.Pitch, p.Yaw, out writeNote);
+                    break;
+                case Method.Look:
+                    // CCSBot.m_lookPitch + m_lookYaw — these are floats on the
+                    // CCSBot struct (the AI controller, separate entity from
+                    // the pawn). Reach via pawn.Bot if exposed; else write
+                    // through pawn schema offset (works only if these fields
+                    // are inlined on the pawn — unlikely but cheap to try).
+                    wrote = WriteLookPitchYaw(pawn, p.Pitch, p.Yaw, out writeNote);
+                    break;
             }
             p.FirstWriteDone = true;
         }
@@ -326,6 +346,57 @@ public static class AimProbe
         }
     }
 
+    /// <summary>
+    /// Write CCSBot.m_lookPitch (float) + CCSBot.m_lookYaw (float) — the
+    /// bot AI's commanded look direction. Reaches CCSBot via pawn.Bot
+    /// (CSSharp wrapper) if available; offset lookup is on "CCSBot" class.
+    /// Writes raw float at each offset, no SetStateChanged.
+    /// </summary>
+    private static unsafe bool WriteLookPitchYaw(CCSPlayerPawn pawn, float pitch, float yaw, out string note)
+    {
+        try
+        {
+            // Try CSSharp's typed Bot accessor first. If it exists and
+            // returns a valid handle, use that.
+            IntPtr botHandle = IntPtr.Zero;
+            try
+            {
+                var bot = pawn.Bot;
+                if (bot != null && bot.Handle != IntPtr.Zero) botHandle = bot.Handle;
+            }
+            catch (Exception ex)
+            {
+                note = $"pawn.Bot threw: {ex.GetType().Name}: {ex.Message}";
+                return false;
+            }
+
+            if (botHandle == IntPtr.Zero)
+            {
+                note = "pawn.Bot was null/0 — bot AI not attached?";
+                return false;
+            }
+
+            int pitchOff = Schema.GetSchemaOffset("CCSBot", "m_lookPitch");
+            int yawOff   = Schema.GetSchemaOffset("CCSBot", "m_lookYaw");
+            if (pitchOff <= 0 || yawOff <= 0)
+            {
+                note = $"GetSchemaOffset CCSBot.m_lookPitch={pitchOff} m_lookYaw={yawOff} — field unknown?";
+                return false;
+            }
+            float* pp = (float*)((byte*)botHandle.ToPointer() + pitchOff);
+            float* py = (float*)((byte*)botHandle.ToPointer() + yawOff);
+            *pp = pitch;
+            *py = yaw;
+            note = $"raw look write @ pitch=0x{pitchOff:X} yaw=0x{yawOff:X} on CCSBot (no SetStateChanged)";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            note = $"WriteLookPitchYaw threw: {ex.GetType().Name}: {ex.Message}";
+            return false;
+        }
+    }
+
     private static float NormalizeYaw(float yaw)
     {
         while (yaw >  180f) yaw -= 360f;
@@ -347,6 +418,8 @@ public static class AimProbe
         {
             "eye" or "eyeangles" or "m_angeyeangles" => Method.EyeAngles,
             "teleport" or "tp"                        => Method.Teleport,
+            "stash" or "stashed" or "shoot"           => Method.Stash,
+            "look" or "lookpitch" or "lookyaw"        => Method.Look,
             _                                          => Method.VAngle,
         };
     }
