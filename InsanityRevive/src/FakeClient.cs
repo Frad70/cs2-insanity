@@ -99,7 +99,7 @@ public sealed class FakeClient
         try
         {
             c.PlayerName = Name;
-            Utilities.SetStateChanged(c, "CBasePlayerController", "m_iszPlayerName", 0);
+            SchemaSafety.MarkChanged(c, "CBasePlayerController", "m_iszPlayerName", 0);
         }
         catch (Exception ex) { Log.Debug($"name overwrite slot={Slot}: {ex.Message}"); }
     }
