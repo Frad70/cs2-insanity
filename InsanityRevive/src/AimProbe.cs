@@ -88,6 +88,9 @@ public static class AimProbe
         Stash,          // raw write to CCSPlayerPawn.m_angStashedShootAngles. Untested.
         Look,           // raw write to CCSBot.m_lookPitch (X) + m_lookYaw (Y). Per strings dump these are bot AI's COMMANDED look direction
                         // — the BT writes these before driving aim. Most promising.
+        EyeFree,        // (1) write false to CCSBot.m_bEyeAnglesUnderPathFinderControl ONCE (releases BT control of eye angles).
+                        // (2) write CCSPlayerPawn.m_angEyeAngles per tick. Tests advisor's hypothesis: m_angEyeAngles only "STICKS" because
+                        // BT's path-finder owns it; flip flag → our writes drive aim.
     }
 
     private struct Pin
@@ -274,6 +277,16 @@ public static class AimProbe
                     // are inlined on the pawn — unlikely but cheap to try).
                     wrote = WriteLookPitchYaw(pawn, p.Pitch, p.Yaw, out writeNote);
                     break;
+                case Method.EyeFree:
+                    // First tick: release BT control. Every tick: write eye angles.
+                    if (!p.FirstWriteDone)
+                    {
+                        var flagNote = WriteEyeFreeFlag(pawn);
+                        Log.Info($"AimProbe slot={p.Slot} EyeFree flag-write: {flagNote}");
+                    }
+                    wrote = WriteRawAngle(pawn.Handle, "CCSPlayerPawn", "m_angEyeAngles",
+                                          p.Pitch, p.Yaw, out writeNote);
+                    break;
             }
             p.FirstWriteDone = true;
         }
@@ -397,6 +410,40 @@ public static class AimProbe
         }
     }
 
+    /// <summary>
+    /// One-shot: write false to CCSBot.m_bEyeAnglesUnderPathFinderControl.
+    /// If this flag gates whether the BT owns the bot's eye angles, flipping
+    /// it should let our subsequent m_angEyeAngles writes actually drive aim.
+    /// Returns a note describing the result.
+    /// </summary>
+    private static unsafe string WriteEyeFreeFlag(CCSPlayerPawn pawn)
+    {
+        try
+        {
+            IntPtr botHandle = IntPtr.Zero;
+            try
+            {
+                var bot = pawn.Bot;
+                if (bot != null && bot.Handle != IntPtr.Zero) botHandle = bot.Handle;
+            }
+            catch (Exception ex)
+            {
+                return $"pawn.Bot threw: {ex.GetType().Name}: {ex.Message}";
+            }
+            if (botHandle == IntPtr.Zero) return "pawn.Bot null/0";
+            int off = Schema.GetSchemaOffset("CCSBot", "m_bEyeAnglesUnderPathFinderControl");
+            if (off <= 0) return $"GetSchemaOffset returned {off}";
+            byte* p = (byte*)((byte*)botHandle.ToPointer() + off);
+            byte prev = *p;
+            *p = 0;
+            return $"set CCSBot.m_bEyeAnglesUnderPathFinderControl @ 0x{off:X} (was={prev}, now=0)";
+        }
+        catch (Exception ex)
+        {
+            return $"WriteEyeFreeFlag threw: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
     private static float NormalizeYaw(float yaw)
     {
         while (yaw >  180f) yaw -= 360f;
@@ -420,6 +467,7 @@ public static class AimProbe
             "teleport" or "tp"                        => Method.Teleport,
             "stash" or "stashed" or "shoot"           => Method.Stash,
             "look" or "lookpitch" or "lookyaw"        => Method.Look,
+            "eyefree" or "free" or "pathfinder"       => Method.EyeFree,
             _                                          => Method.VAngle,
         };
     }
