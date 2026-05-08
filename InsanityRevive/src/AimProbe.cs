@@ -296,16 +296,32 @@ public static class AimProbe
                                               float pitch, float yaw,
                                               out string note)
     {
+        // CSSharp's Schema.SetSchemaValue<T> resolves T against schema
+        // metadata — it rejects user-defined structs (first attempt with
+        // a local 3-float struct produced "Error retrieving data type for
+        // type InsanityRevive.AimProbe+RawAngle"). Bypass: look up the
+        // field's byte offset, then memcpy 3 floats directly into the
+        // native object. No SetStateChanged — that's the whole point of
+        // the probe (deny-list crash trigger was specifically the
+        // SetStateChanged for this family of fields).
         try
         {
-            var raw = new RawAngle { Pitch = pitch, Yaw = yaw, Roll = 0f };
-            Schema.SetSchemaValue<RawAngle>(handle, schemaClass, fieldName, raw);
-            note = $"Schema.SetSchemaValue<RawAngle>({schemaClass}.{fieldName}) ok (no SetStateChanged)";
+            int offset = Schema.GetSchemaOffset(schemaClass, fieldName);
+            if (offset <= 0)
+            {
+                note = $"Schema.GetSchemaOffset({schemaClass}.{fieldName}) returned {offset} — field unknown?";
+                return false;
+            }
+            float* p = (float*)((byte*)handle.ToPointer() + offset);
+            p[0] = pitch;
+            p[1] = yaw;
+            p[2] = 0f;
+            note = $"raw write @ offset 0x{offset:X} of {schemaClass}.{fieldName} (no SetStateChanged)";
             return true;
         }
         catch (Exception ex)
         {
-            note = $"Schema.SetSchemaValue<RawAngle>({schemaClass}.{fieldName}) threw: {ex.GetType().Name}: {ex.Message}";
+            note = $"raw write {schemaClass}.{fieldName} threw: {ex.GetType().Name}: {ex.Message}";
             return false;
         }
     }
