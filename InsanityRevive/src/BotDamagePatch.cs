@@ -1,51 +1,54 @@
 using System;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Memory;
-using CounterStrikeSharp.API.Modules.Memory.DynamicFunctions;
 
 namespace InsanityRevive;
 
 /// <summary>
-/// Patches bot-vs-bot damage reception to zero.
+/// Filters damage on managed bots during reveal stages.
 ///
-/// Why this exists (v0.6.0.2-beta): the FF fix in v0.6.0.1-beta forced
-/// <c>mp_teammates_are_enemies 1</c> at Stage 1 entry so a same-team
-/// human takes damage from bots. Side-effect: bots also see EACH OTHER
-/// as enemies and prefer the 7 nearest "enemies" (other bots) over the
-/// 1 distant human, then proceed to mulch the fleet during Stage 1
-/// knife rush. Empirically observed 2026-05-02.
+/// Two flavors of damage are blocked when active:
+///   1) Inflictor class is inferno / molotov_projectile / hegrenade_projectile.
+///      Used by Stage 4 APOCALYPSE so the grenade-rain effect fries humans
+///      but not the swarm itself. Without this the molotovs from probe 2 of
+///      `notes/stage_3_4_probes.md` would mulch our own bots first.
+///   2) Attacker is another managed bot. Belt-and-suspenders for Stage 1+
+///      after `mp_teammates_are_enemies` experiments — even if that path
+///      is reintroduced later, bots will not damage each other directly.
+///      Self-damage (slot==slot) is allowed (legit env / fall damage).
 ///
-/// Fix: hook <c>CBaseEntity::TakeDamage</c> pre-call. If both attacker
-/// and victim are managed bots (i.e. their controller slots are in
-/// <see cref="FakeClientManager"/>'s registry), zero out the damage and
-/// return <see cref="HookResult.Changed"/>. The damage event still fires
-/// (visual flinch, blood, ricochet sound — bots still LOOK like they're
-/// fighting each other) but no HP is lost.
+/// Implementation notes:
+///   - Was: `VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Hook(...)` which
+///     CSSharp 1.0.367 marked obsolete.
+///   - Now: `Listeners.OnEntityTakeDamagePre` — modern, documented, public.
+///     Returning `HookResult.Handled` prevents the entire damage pipeline.
 ///
-/// Always-on (registered at plugin Load, unhooked at Unload). During
-/// normal fleet operation pre-reveal, default mp_friendlyfire=0 already
-/// blocks same-team damage, so this hook is a no-op there. During reveal
-/// Stage 1+2 it's the load-bearing fix.
-///
-/// Bot-vs-human and human-vs-bot damage is unaffected (only one side is
-/// a managed bot, so the gate trips false and damage flows normally).
+/// Caller (RevealController) toggles via Install/Uninstall. NOT installed
+/// at plugin Load — Stage 4 entry installs, EndReveal uninstalls.
 /// </summary>
 public sealed class BotDamagePatch
 {
+    private readonly BasePlugin _plugin;
     private readonly FakeClientManager _mgr;
     private bool _hooked;
+    private Listeners.OnEntityTakeDamagePre? _handler;
 
-    public BotDamagePatch(FakeClientManager mgr) => _mgr = mgr;
+    public BotDamagePatch(BasePlugin plugin, FakeClientManager mgr)
+    {
+        _plugin = plugin;
+        _mgr = mgr;
+    }
 
     public void Install()
     {
         if (_hooked) return;
         try {
-            VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Hook(OnTakeDamage, HookMode.Pre);
+            _handler = OnEntityTakeDamage;
+            _plugin.RegisterListener<Listeners.OnEntityTakeDamagePre>(_handler);
             _hooked = true;
-            Log.Info("BotDamagePatch installed (CBaseEntity_TakeDamageOldFunc PRE-hook)");
+            Log.Info("BotDamagePatch installed (Listeners.OnEntityTakeDamagePre)");
         } catch (Exception ex) {
             Log.Error($"BotDamagePatch install: {ex.Message}");
+            _handler = null;
         }
     }
 
@@ -53,47 +56,57 @@ public sealed class BotDamagePatch
     {
         if (!_hooked) return;
         try {
-            VirtualFunctions.CBaseEntity_TakeDamageOldFunc.Unhook(OnTakeDamage, HookMode.Pre);
+            if (_handler != null)
+                _plugin.RemoveListener<Listeners.OnEntityTakeDamagePre>(_handler);
         } catch (Exception ex) {
             Log.Debug($"BotDamagePatch unhook: {ex.Message}");
         }
         _hooked = false;
+        _handler = null;
     }
 
-    private HookResult OnTakeDamage(DynamicHook hook)
+    public bool IsInstalled => _hooked;
+
+    private HookResult OnEntityTakeDamage(CEntityInstance entity, CTakeDamageInfo info)
     {
         try {
-            var info = hook.GetParam<CTakeDamageInfo>(1);
-            // Damage info has Attacker (CHandle<CBaseEntity>). Resolve
-            // to CCSPlayerPawn → CCSPlayerController → slot.
-            var attackerEnt = info.Attacker.Value;
-            if (attackerEnt is not CCSPlayerPawn attackerPawn) return HookResult.Continue;
-            var attackerCtrl = attackerPawn.Controller.Value as CCSPlayerController;
-            if (attackerCtrl == null || !attackerCtrl.IsValid) return HookResult.Continue;
-
-            // Victim is the entity whose TakeDamage is being called — param 0
-            // is the implicit `this` pointer in the virtual call (CEntityInstance).
-            var victimInst = hook.GetParam<CEntityInstance>(0);
-            // CCSPlayerPawn IS-A CEntityInstance — direct cast.
-            if (victimInst is not CCSPlayerPawn victimPawn) return HookResult.Continue;
+            // We only filter damage TO managed bots. Humans take damage normally.
+            if (entity is not CCSPlayerPawn victimPawn) return HookResult.Continue;
             var victimCtrl = victimPawn.Controller.Value as CCSPlayerController;
             if (victimCtrl == null || !victimCtrl.IsValid) return HookResult.Continue;
 
-            // Self-damage (grenades, falls, world): allow — the attacker
-            // and victim being "the same managed bot" should still take
-            // legit env damage. Only block bot-on-OTHER-bot damage.
-            if (attackerCtrl.Slot == victimCtrl.Slot) return HookResult.Continue;
+            int victimSlot = (int)victimCtrl.Slot;
+            bool victimIsManagedBot = _mgr.FindBySlot(victimSlot) != null;
+            if (!victimIsManagedBot) return HookResult.Continue;
 
-            bool attackerIsManagedBot = _mgr.FindBySlot((int)attackerCtrl.Slot) != null;
-            bool victimIsManagedBot   = _mgr.FindBySlot((int)victimCtrl.Slot) != null;
+            // Class 1: environmental projectile rain (Stage 4 APOCALYPSE).
+            // Inflictor is the projectile/inferno entity itself, not the
+            // thrower. This catches molotov_projectile mid-air, the inferno
+            // entity once it ignites, and HE before/at detonation.
+            var inflictorEnt = info.Inflictor.Value;
+            if (inflictorEnt != null) {
+                var inflictorClass = inflictorEnt.DesignerName;
+                if (inflictorClass == "inferno"
+                    || inflictorClass == "molotov_projectile"
+                    || inflictorClass == "hegrenade_projectile") {
+                    return HookResult.Handled;
+                }
+            }
 
-            if (attackerIsManagedBot && victimIsManagedBot)
-            {
-                info.Damage = 0f;
-                return HookResult.Changed;
+            // Class 2: bot-vs-bot direct damage. Self-damage allowed.
+            var attackerEnt = info.Attacker.Value;
+            if (attackerEnt is CCSPlayerPawn attackerPawn) {
+                var attackerCtrl = attackerPawn.Controller.Value as CCSPlayerController;
+                if (attackerCtrl != null && attackerCtrl.IsValid) {
+                    int attackerSlot = (int)attackerCtrl.Slot;
+                    if (attackerSlot == victimSlot) return HookResult.Continue;
+                    if (_mgr.FindBySlot(attackerSlot) != null) {
+                        return HookResult.Handled;
+                    }
+                }
             }
         } catch (Exception ex) {
-            Log.Debug($"OnTakeDamage filter: {ex.Message}");
+            Log.Debug($"OnEntityTakeDamage filter: {ex.Message}");
         }
         return HookResult.Continue;
     }
