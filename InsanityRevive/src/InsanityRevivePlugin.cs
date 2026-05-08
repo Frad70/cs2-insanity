@@ -224,6 +224,21 @@ public sealed class InsanityRevivePlugin : BasePlugin
         info.ReplyToCommand($"[Insanity] reveal: prev={prevStage} → Stage0");
     }
 
+    // P/12 Stage 4 APOCALYPSE manual trigger (v0.7.0-beta — 2026-05-08).
+    // Requires reveal already active (Stage 1/2/3); transitions to Stage 4.
+    [ConsoleCommand("insanity_reveal_apocalypse", "Trigger Stage 4 (C4 suicide bots) — requires active reveal")]
+    [ConsoleCommand("css_reveal_apocalypse", "Trigger Stage 4 (chat: !reveal_apocalypse)")]
+    [RequiresPermissions("@css/root")]
+    public void OnRevealApocalypse(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        var prevStage = _manager.Reveal.Stage;
+        bool ok = _manager.Reveal.StartApocalypse();
+        info.ReplyToCommand(ok
+            ? $"[Insanity] APOCALYPSE: prev={prevStage} → Stage4"
+            : $"[Insanity] APOCALYPSE refused (stage={prevStage}); start a reveal first");
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // Stage 4 probes (temporary live-verification commands; see Probe.cs)
     // ──────────────────────────────────────────────────────────────────

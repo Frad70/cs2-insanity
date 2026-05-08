@@ -372,3 +372,59 @@ NEW `notes/stage_4_probes.md` — companion to `stage_3_4_probes.md`. Each probe
 - DLL: `7074f29a3238440a4158e11d69a32aa5d39d9f447bf89e75d38e265ff5b18861`
 
 — agent autonomous-session-step4
+
+---
+
+## 2026-05-08 14:30 — agent autonomous-session-step5 (Opus 4.7 1M, xhigh effort)
+
+**Build coming, hash `5026799c8342794787be287343442df7e7e95904472bc03281c671fc81447b82`, files: RevealController.cs (Stage 4 block), InsanityRevivePlugin.cs (one rcon command).**
+
+**v0.7.0-beta — P/12 Stage 4 APOCALYPSE (C4 suicide bots).**
+
+Manual-only trigger `!reveal_apocalypse` / `insanity_reveal_apocalypse`. Requires reveal already active (Stage 1/2/3 — Idle returns refused). `RevealController.StartApocalypse()` is idempotent on Stage 4 itself.
+
+**EnterStage4** flow:
+1. Install `BotDamagePatch` (ported in step 2). Filter blocks inferno/molotov/HE damage to managed bots — explosions fry humans, not the swarm.
+2. Promote 1-of-3 bots to C4 carriers (`Stage4CarrierFraction = 3`). For each: `c.GiveNamedItem("weapon_c4")` + register in `_apocalypseCarriers` dictionary.
+3. Chat: `[INSANITY] APOCALYPSE — C4 RAIN`.
+
+**TickStage4** per-tick logic:
+- Vision check at 0.5s cadence — distance-only (no working TraceRay wrapper in CSSharp 1.0.367 per existing comment in `DeploySwarmAndKnifeRush`). Carrier within `Stage4VisionRangeHU = 1968` (≈30m) of any living human → arm. Random detonation timer 5–10s.
+- Beep loop: interpolated interval Early=45t (~0.7s) → Late=19t (~0.3s) as detonation nears. Tries 5 candidate soundevents (`Weapon_C4.Click`, `weapons.c4.beep`, `Weapons.C4.Beep`, `BombPlant.Beep`, `Weapon_C4.PlantBeep`) — first that doesn't throw wins. Failure logs once per beep, doesn't crash.
+- Detonate: when timer expires, spawn `env_explosion` at carrier's current pos (or `LastKnownHumanPos` if pawn went invalid). `iMagnitude=200`, `radius=400` HU, fired via `AcceptInput("Explode")`. Carrier `CommitSuicide`s post-detonation.
+
+**Termination:** `Stage4MaxDurationSec = 90` hard cap, OR all carriers detonated, OR last living human dies (uses existing `_zeroHumansTickCount` damped early-end path — extended to cover Stage 4).
+
+**Cleanup:** added to `CleanupReveal`. Uninstalls `BotDamagePatch`, clears `_apocalypseCarriers`. Spawned `env_explosion` entities self-clean after Explode input. Weapon_c4 give-effects clear via the auto-`mp_restartgame 1` that `RevealAutoRestart` issues post-EndReveal.
+
+**SchemaSafety integration:** `SpawnExplosionAt` writes `m_iMagnitude` and `m_flRadius` via `SchemaSafety.WriteAndMark<>` — neither field is on the deny-list. If schema write fails (helper logs and returns false), the entity still gets default magnitude/radius which is still visible.
+
+**Conservative scope (deferred for v0.7.x patches):**
+- AI-override "move toward last-known-human-pos" — no direct AI control API in CSSharp; bot AI handles movement naturally during Stage 4 (they had m249 from Stage 2, will keep firing while approaching humans).
+- Drop-on-death visual chrome: `light_dynamic` + `env_fire` parented to dropped C4. v1 just detonates at the carrier's last position regardless of carrier alive/dead.
+- Beep-escalation tuning may need adjustment after first live test — current 0.7s→0.3s lerp is a guess.
+- Per-carrier 0.5x incoming damage: deferred (need to verify `m_flLaggedMovementValue` actually applies that way, or use a damage-modifier path through `OnEntityTakeDamagePre`).
+
+**Smoke verification (live, this session):**
+1. Pre-deploy hash baseline `5026799c...` recorded.
+2. Server restarted clean (slot 0-7 fresh, no fragmentation).
+3. `insanity_reveal_apocalypse` from Idle → "APOCALYPSE refused (stage=Idle); start a reveal first" (correct).
+4. `insanity_reveal` → Stage 0 entered.
+5. `insanity_reveal_apocalypse` from Stage 0 → server.log shows:
+   - `[Insanity][INFO] BotDamagePatch installed (Listeners.OnEntityTakeDamagePre)`
+   - `[Insanity][INFO] Stage 4 APOCALYPSE: 3 carriers armed of 8 bots (fraction 1/3)`
+   - No exception, no crash, no SchemaSafety REFUSED log.
+6. Vision detection NOT exercised in this smoke (no humans connected, user away). Detonation NOT exercised. v1 needs friend playtest to verify env_explosion actually fires + visuals + audio.
+
+**Files touched:** `RevealController.cs` (~280 new lines: enum value already existed, state struct, EnterStage4, TickStage4 + 4 helpers, cleanup hook, OnTick switch arm), `InsanityRevivePlugin.cs` (~13 lines: one ConsoleCommand pair + handler).
+
+**Sha256 baseline после v0.7.0-beta:**
+- DLL: `5026799c8342794787be287343442df7e7e95904472bc03281c671fc81447b82`
+
+**Live verification gates (pending user-driven session):**
+- 🔴 vision-LOS: distance-only might trigger through walls. If "boom from across the map" feels wrong, future patch swaps to TraceRay-when-available.
+- 🔴 explosion damage: actual radius/magnitude tuning needs friend playtest. 200/400 is HE-grenade-ish — might be too weak for "apocalypse" feel.
+- 🔴 beep audibility: 5 soundevent candidates. If none play, future patch tries `weapons/c4/c4_beep1.vsnd_c` raw path or alternative sound system entry.
+- 🟢 (verified live this session): trigger gating, carrier promotion, BotDamagePatch install, no crashes.
+
+— agent autonomous-session-step5

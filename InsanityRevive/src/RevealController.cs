@@ -53,6 +53,25 @@ public sealed class RevealController
     /// </summary>
     private const int Stage3MaxDurationSec = 30;
 
+    // Stage 4 (APOCALYPSE) tunables.
+    /// <summary>Hard upper bound on Stage 4 duration. After this, EndReveal regardless of carrier state.</summary>
+    private const int Stage4MaxDurationSec = 90;
+    /// <summary>Carrier "vision" range for detonator-mode arming. ~30m world ≈ 1968 Hammer Units (1m ≈ 65.6 HU).</summary>
+    private const float Stage4VisionRangeHU = 1968f;
+    /// <summary>Detonator timer min/max (random per-carrier on arm). Range 5–10 sec.</summary>
+    private const int Stage4DetonateDelayMinTicks = 5 * 64;
+    private const int Stage4DetonateDelayMaxTicks = 10 * 64;
+    /// <summary>Beep interval at arm time (slow) and at detonation (fast). Linear interpolation between.</summary>
+    private const int Stage4BeepIntervalEarlyTicks = 45;  // ~0.7s @ 64Hz
+    private const int Stage4BeepIntervalLateTicks  = 19;  // ~0.3s @ 64Hz
+    /// <summary>Vision-detection cadence. 0.5s — cheap, sufficient for "saw a human in last half-second".</summary>
+    private const int Stage4VisionTickInterval = 32;
+    /// <summary>env_explosion params at detonation. iMagnitude 200 ~ HE grenade equivalent; radius 400 HU ~ 6m.</summary>
+    private const int   Stage4ExplosionMagnitude = 200;
+    private const float Stage4ExplosionRadius    = 400f;
+    /// <summary>1 in N bots becomes a C4 carrier on Stage 4 entry. 3 = ~33% of fleet.</summary>
+    private const int Stage4CarrierFraction = 3;
+
     /// <summary>
     /// Cooldown between same-slot respawns in HELL MODE. Without it,
     /// EventPlayerDeath could fire repeatedly on a single death and
@@ -150,6 +169,24 @@ public sealed class RevealController
         public string ForcedWeapon;       // e.g. "weapon_knife", "weapon_m249"
         public RevealStage StageWhenSet;
     }
+
+    /// <summary>
+    /// Per-carrier Stage 4 state. Created on Stage 4 entry for each bot
+    /// promoted to C4 carrier, mutated through arm → beep → detonate.
+    /// Cleared at CleanupReveal.
+    /// </summary>
+    private struct ApocalypseCarrier
+    {
+        public bool   Armed;
+        public bool   Detonated;
+        public int    ArmedAtTick;
+        public int    DetonateAtTick;
+        public int    LastBeepTick;
+        public Vector? LastKnownHumanPos;
+    }
+
+    private readonly Dictionary<int, ApocalypseCarrier> _apocalypseCarriers = new();
+    private int _stage4LastVisionTick;
 
     public RevealController(FakeClientManager mgr) => _mgr = mgr;
 
@@ -652,6 +689,306 @@ public sealed class RevealController
         }
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Stage 4 — APOCALYPSE (C4 suicide bots)
+    // ──────────────────────────────────────────────────────────────────
+    //
+    // Manual-only trigger: !reveal_apocalypse / insanity_reveal_apocalypse.
+    // Per session-plan 2026-05-08: usable from Stage 1/2/3 (not Idle).
+    // Calling during an already-active Stage 4 is a no-op (idempotent).
+    //
+    // Entry effects:
+    //  - Install BotDamagePatch (Listeners.OnEntityTakeDamagePre filter,
+    //    blocks inferno/molotov/HE damage TO managed bots — explosions
+    //    fry humans only). Step 2 of 2026-05-08 session.
+    //  - Every Nth bot (default 1-of-3) gets weapon_c4 via GiveNamedItem.
+    //    Probe 2 (notes/stage_4_probes.md) verifies whether visible C4 +
+    //    no PLANT-marker is achievable; v1 ships best-effort, will adjust
+    //    after first user-driven probe.
+    //  - Each carrier enters arm-pending state. Vision tick polls every
+    //    0.5s, arms carrier when distance to nearest human < ~30m.
+    //
+    // Per-tick:
+    //  - Beep escalation (interval lerps 0.7s → 0.3s as detonation nears).
+    //  - Detonation when timer expires — env_explosion at carrier's
+    //    current pos (or last-known if pawn went invalid).
+    //
+    // Termination: max-duration hit OR all carriers detonated.
+    public bool StartApocalypse()
+    {
+        if (Stage == RevealStage.Idle) {
+            Log.Warn("StartApocalypse: reveal not active — Stage Idle.");
+            return false;
+        }
+        if (Stage == RevealStage.Stage4) {
+            Log.Info("StartApocalypse: already in Stage 4 — no-op.");
+            return false;
+        }
+        EnterStage4();
+        return true;
+    }
+
+    private void EnterStage4()
+    {
+        Stage = RevealStage.Stage4;
+        _stageStartTick = Server.TickCount;
+        _stage4LastVisionTick = 0;
+        _apocalypseCarriers.Clear();
+
+        _mgr.Telemetry.Write("reveal_stage_enter", new Dictionary<string, object?> {
+            { "stage", "Stage4" }, { "name", "APOCALYPSE" } });
+
+        Server.PrintToChatAll($" {ChatColors.DarkRed}[INSANITY] APOCALYPSE — C4 RAIN");
+
+        // Install damage filter so the explosions don't fry our own swarm
+        // alongside the humans. Idempotent — Install no-ops if already on.
+        if (!_mgr.DamagePatch.IsInstalled) _mgr.DamagePatch.Install();
+
+        // Promote 1-of-N bots to C4 carriers.
+        var bots = _mgr.All.ToList();
+        int carrierCount = 0;
+        for (int i = 0; i < bots.Count; i++)
+        {
+            if (i % Stage4CarrierFraction != 0) continue;
+            var fc = bots[i];
+            try
+            {
+                var c = Utilities.GetPlayerFromSlot(fc.Slot);
+                if (c == null || !c.IsValid) continue;
+                var pawn = c.PlayerPawn?.Value;
+                if (pawn == null || !pawn.IsValid || pawn.LifeState != 0) continue;
+
+                c.GiveNamedItem("weapon_c4");
+                _combatState[fc.Slot] = new BotCombatState {
+                    ForcedWeapon = "weapon_c4", StageWhenSet = RevealStage.Stage4 };
+                _apocalypseCarriers[fc.Slot] = new ApocalypseCarrier {
+                    Armed = false, Detonated = false,
+                    LastBeepTick = 0, LastKnownHumanPos = null,
+                };
+                carrierCount++;
+            }
+            catch (Exception ex) { Log.Error($"Stage4 give c4 slot={fc.Slot}: {ex.Message}"); }
+        }
+
+        Log.Info($"Stage 4 APOCALYPSE: {carrierCount} carriers armed of {bots.Count} bots " +
+                 $"(fraction 1/{Stage4CarrierFraction})");
+    }
+
+    private void TickStage4()
+    {
+        EnforceTeamMembership();
+
+        // Vision check at 0.5s cadence — distance-only because no working
+        // TraceRay wrapper in CSSharp 1.0.367 (see DeploySwarmAndKnifeRush
+        // comment for why we don't LOS-check). Distance-only means a
+        // carrier can arm through a wall; acceptable trade for v1 — the
+        // explosion radius is large enough to splash into adjacent rooms
+        // anyway.
+        if (Server.TickCount - _stage4LastVisionTick >= Stage4VisionTickInterval)
+        {
+            _stage4LastVisionTick = Server.TickCount;
+            DoStage4Vision();
+        }
+
+        // Per-tick: beep + detonate. Both are cheap (≤ N=fleet/3 reads).
+        DoStage4Beep();
+        DoStage4Detonate();
+
+        // Termination 1: max duration hit.
+        var elapsedSec = (Server.TickCount - _stageStartTick) / 64;
+        if (elapsedSec >= Stage4MaxDurationSec)
+        {
+            EndReveal();
+            return;
+        }
+
+        // Termination 2: all carriers detonated. Saves us 60+ sec of
+        // dead-stage if the boom plays out fast.
+        bool anyCarrierLive = false;
+        foreach (var (_, st) in _apocalypseCarriers)
+        {
+            if (!st.Detonated) { anyCarrierLive = true; break; }
+        }
+        if (!anyCarrierLive && _apocalypseCarriers.Count > 0) EndReveal();
+    }
+
+    private void DoStage4Vision()
+    {
+        var humans = LivingHumanControllers();
+        if (humans.Count == 0) return;
+
+        var slots = _apocalypseCarriers.Keys.ToList();
+        foreach (var slot in slots)
+        {
+            var carrier = _apocalypseCarriers[slot];
+            if (carrier.Armed || carrier.Detonated) continue;
+
+            try
+            {
+                var c = Utilities.GetPlayerFromSlot(slot);
+                if (c == null || !c.IsValid) continue;
+                var pawn = c.PlayerPawn?.Value;
+                if (pawn == null || !pawn.IsValid || pawn.LifeState != 0) continue;
+                if (pawn.AbsOrigin == null) continue;
+
+                Vector? nearestPos = null;
+                float nearestD2 = Stage4VisionRangeHU * Stage4VisionRangeHU;
+                foreach (var h in humans)
+                {
+                    var hp = h.PlayerPawn?.Value;
+                    if (hp?.AbsOrigin == null) continue;
+                    float dx = hp.AbsOrigin.X - pawn.AbsOrigin.X;
+                    float dy = hp.AbsOrigin.Y - pawn.AbsOrigin.Y;
+                    float dz = hp.AbsOrigin.Z - pawn.AbsOrigin.Z;
+                    float d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 < nearestD2) { nearestD2 = d2; nearestPos = hp.AbsOrigin; }
+                }
+
+                if (nearestPos == null) continue;
+
+                int delay = _rng.Next(Stage4DetonateDelayMinTicks,
+                                      Stage4DetonateDelayMaxTicks + 1);
+                carrier.Armed = true;
+                carrier.ArmedAtTick = Server.TickCount;
+                carrier.DetonateAtTick = Server.TickCount + delay;
+                carrier.LastKnownHumanPos = nearestPos;
+                _apocalypseCarriers[slot] = carrier;
+                Log.Info($"Stage 4 carrier slot={slot} ARMED — detonate in {delay / 64.0:F1}s");
+            }
+            catch (Exception ex) { Log.Debug($"Stage4 vision slot={slot}: {ex.Message}"); }
+        }
+    }
+
+    private void DoStage4Beep()
+    {
+        var slots = _apocalypseCarriers.Keys.ToList();
+        foreach (var slot in slots)
+        {
+            var carrier = _apocalypseCarriers[slot];
+            if (!carrier.Armed || carrier.Detonated) continue;
+
+            int totalDelay = carrier.DetonateAtTick - carrier.ArmedAtTick;
+            int elapsed    = Server.TickCount - carrier.ArmedAtTick;
+            float t = totalDelay > 0
+                ? Math.Clamp((float)elapsed / totalDelay, 0f, 1f)
+                : 1f;
+            int interval = (int)(Stage4BeepIntervalEarlyTicks * (1 - t)
+                               + Stage4BeepIntervalLateTicks  * t);
+
+            if (Server.TickCount - carrier.LastBeepTick < interval) continue;
+
+            try
+            {
+                var c = Utilities.GetPlayerFromSlot(slot);
+                var pawn = c?.PlayerPawn?.Value;
+                if (pawn != null && pawn.IsValid)
+                {
+                    // Try canonical CS2 C4 beep soundevents in priority
+                    // order — exact name varies across CS2 game updates.
+                    // Each EmitSound throws on unknown event; swallow
+                    // and try the next.
+                    bool emitted = false;
+                    string[] candidates = {
+                        "Weapon_C4.Click", "weapons.c4.beep", "Weapons.C4.Beep",
+                        "BombPlant.Beep",  "Weapon_C4.PlantBeep",
+                    };
+                    foreach (var snd in candidates)
+                    {
+                        try { pawn.EmitSound(snd); emitted = true; break; }
+                        catch { /* try next */ }
+                    }
+                    if (!emitted) Log.Debug($"Stage4 beep slot={slot}: no working soundevent");
+                }
+            }
+            catch (Exception ex) { Log.Debug($"Stage4 beep slot={slot}: {ex.Message}"); }
+
+            carrier.LastBeepTick = Server.TickCount;
+            _apocalypseCarriers[slot] = carrier;
+        }
+    }
+
+    private void DoStage4Detonate()
+    {
+        var slots = _apocalypseCarriers.Keys.ToList();
+        foreach (var slot in slots)
+        {
+            var carrier = _apocalypseCarriers[slot];
+            if (!carrier.Armed || carrier.Detonated) continue;
+            if (Server.TickCount < carrier.DetonateAtTick) continue;
+
+            // Resolve detonation position.
+            Vector? pos = null;
+            CCSPlayerController? c = null;
+            try
+            {
+                c = Utilities.GetPlayerFromSlot(slot);
+                var pawn = c?.PlayerPawn?.Value;
+                if (pawn?.AbsOrigin != null && pawn.IsValid && pawn.LifeState == 0)
+                {
+                    pos = pawn.AbsOrigin;
+                }
+                else
+                {
+                    pos = carrier.LastKnownHumanPos;
+                }
+            }
+            catch { pos = carrier.LastKnownHumanPos; }
+
+            if (pos != null) SpawnExplosionAt(pos);
+
+            carrier.Detonated = true;
+            _apocalypseCarriers[slot] = carrier;
+
+            // Suicide the carrier — visual death + drops C4. Best-effort;
+            // if pawn already invalid the explosion already fired anyway.
+            try
+            {
+                var pawn = c?.PlayerPawn?.Value;
+                if (pawn != null && pawn.IsValid && pawn.LifeState == 0)
+                    pawn.CommitSuicide(true, true);
+            }
+            catch (Exception ex) { Log.Debug($"Stage4 carrier suicide slot={slot}: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Spawn an env_explosion at <paramref name="pos"/> and immediately
+    /// trigger it via "Explode" input. Bots are immune via BotDamagePatch
+    /// (inflictor class = "hegrenade_projectile" or similar from the
+    /// explosion's damage path). Humans take damage normally.
+    ///
+    /// Best-effort: if entity creation fails (CSSharp build doesn't
+    /// expose CEnvExplosion typed wrapper, or DispatchSpawn API
+    /// missing), logs and returns. Stage 4 still ends, just without
+    /// visible boom — fallback acceptable for v1.
+    /// </summary>
+    private void SpawnExplosionAt(Vector pos)
+    {
+        try
+        {
+            var explosion = Utilities.CreateEntityByName<CEnvExplosion>("env_explosion");
+            if (explosion == null || !explosion.IsValid)
+            {
+                Log.Warn("Stage 4 SpawnExplosionAt: CreateEntityByName returned null/invalid");
+                return;
+            }
+
+            // Configure magnitude + radius via schema (these fields are
+            // documented as networked on CEnvExplosion). If SchemaSafety
+            // refuses, we just get a default-strength explosion which is
+            // still visible/audible.
+            SchemaSafety.WriteAndMark<int>(explosion, explosion.Handle,
+                "CEnvExplosion", "m_iMagnitude", Stage4ExplosionMagnitude);
+            SchemaSafety.WriteAndMark<float>(explosion, explosion.Handle,
+                "CEnvExplosion", "m_flRadius", Stage4ExplosionRadius);
+
+            explosion.Teleport(pos, new QAngle(), new Vector());
+            explosion.DispatchSpawn();
+            explosion.AcceptInput("Explode");
+        }
+        catch (Exception ex) { Log.Error($"Stage 4 SpawnExplosionAt: {ex.Message}"); }
+    }
+
     private void EndReveal()
     {
         _mgr.Telemetry.Write("reveal_stage_enter", new Dictionary<string, object?> {
@@ -706,6 +1043,19 @@ public sealed class RevealController
 
             foreach (var fc in _mgr.All) RestoreNormalLoadout(fc);
             _combatState.Clear();
+
+            // Stage 4 cleanup: uninstall the damage filter (was installed
+            // at Stage 4 entry to make the swarm immune to its own
+            // explosions), clear carrier state. Spawned env_explosion
+            // entities self-clean after Explode input fires; weapon_c4
+            // give-effects clear at the next mp_restartgame which the
+            // RevealAutoRestart path issues a few lines below this method.
+            if (_mgr.DamagePatch.IsInstalled)
+            {
+                _mgr.DamagePatch.Uninstall();
+            }
+            _apocalypseCarriers.Clear();
+            _stage4LastVisionTick = 0;
         } catch (Exception ex) { Log.Error($"CleanupReveal: {ex.Message}"); }
         Stage = RevealStage.Idle;
         _mgr.Telemetry.Write("reveal_cleanup", new Dictionary<string, object?> {
@@ -745,6 +1095,7 @@ public sealed class RevealController
             case RevealStage.Stage1: TickStage1(); break;
             case RevealStage.Stage2: TickStage2(); break;
             case RevealStage.Stage3: TickStage3(); break;
+            case RevealStage.Stage4: TickStage4(); break;
         }
 
         // Early-end trigger: 0 living humans sustained for ≥1 sec.
@@ -756,7 +1107,8 @@ public sealed class RevealController
         // Now: "0 humans → EndReveal directly". Skipping HELL MODE makes
         // sense because there's no one to terrorize. HELL MODE Stage 3
         // is reached normally via Stage 2's natural timer transition.
-        if (Stage == RevealStage.Stage1 || Stage == RevealStage.Stage2 || Stage == RevealStage.Stage3)
+        if (Stage == RevealStage.Stage1 || Stage == RevealStage.Stage2
+            || Stage == RevealStage.Stage3 || Stage == RevealStage.Stage4)
         {
             if (LivingHumansCount() == 0 && _humansAtStart > 0) {
                 _zeroHumansTickCount++;
