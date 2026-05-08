@@ -1,0 +1,123 @@
+# CodeQL static analysis. C# is built via the same path as build.yml
+# (CSSharp.API.dll fetched from upstream release). C++ build piggy-backs
+# on the existing Makefile + vendored hl2sdk + metamod-source.
+#
+# Runs on push/PR to main + a weekly schedule so we catch new advisories
+# even without code churn.
+
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "32 6 * * 1"   # Mondays 06:32 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+env:
+  CSSHARP_VERSION: "1.0.367"
+  HL2SDK_REPO: "https://github.com/alliedmodders/hl2sdk.git"
+  HL2SDK_BRANCH: "cs2"
+  MMSOURCE_REPO: "https://github.com/alliedmodders/metamod-source.git"
+  MMSOURCE_BRANCH: "master"
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: csharp
+            build-mode: manual
+          - language: cpp
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Set up .NET 8
+        if: matrix.language == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Fetch CSSharp.API.dll
+        if: matrix.language == 'csharp'
+        run: |
+          mkdir -p .ci/cssharp-api
+          url="https://github.com/roflmuffin/CounterStrikeSharp/releases/download/v${CSSHARP_VERSION}/counterstrikesharp-linux-${CSSHARP_VERSION}.zip"
+          curl -fsSL --retry 4 --retry-delay 4 -o /tmp/cssharp.zip "$url"
+          unzip -o -q /tmp/cssharp.zip -d /tmp/cssharp/
+          api_dll=$(find /tmp/cssharp -name 'CounterStrikeSharp.API.dll' | head -1)
+          [ -n "$api_dll" ] || { echo "API dll not found in zip" >&2; exit 1; }
+          cp "$api_dll" .ci/cssharp-api/CounterStrikeSharp.API.dll
+
+      - name: Build C# for CodeQL
+        if: matrix.language == 'csharp'
+        run: |
+          dotnet build InsanityRevive/InsanityRevive.csproj \
+            -c Release \
+            --nologo \
+            -p:CSSharpApiPath="${{ github.workspace }}/.ci/cssharp-api/CounterStrikeSharp.API.dll"
+
+      - name: Install C++ toolchain
+        if: matrix.language == 'cpp'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make
+
+      - name: Cache hl2sdk clone
+        if: matrix.language == 'cpp'
+        id: cache-hl2sdk
+        uses: actions/cache@v4
+        with:
+          path: InsanityHider/hl2sdk
+          key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Cache metamod-source clone
+        if: matrix.language == 'cpp'
+        id: cache-mmsource
+        uses: actions/cache@v4
+        with:
+          path: InsanityHider/mmsource
+          key: mmsource-${{ env.MMSOURCE_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Vendor hl2sdk
+        if: matrix.language == 'cpp' && steps.cache-hl2sdk.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$HL2SDK_BRANCH" \
+            "$HL2SDK_REPO" InsanityHider/hl2sdk
+
+      - name: Vendor metamod-source
+        if: matrix.language == 'cpp' && steps.cache-mmsource.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$MMSOURCE_BRANCH" \
+            "$MMSOURCE_REPO" InsanityHider/mmsource
+
+      - name: Build C++ for CodeQL
+        if: matrix.language == 'cpp'
+        working-directory: InsanityHider
+        run: |
+          chmod +x hl2sdk/devtools/bin/linux/protoc || true
+          make -j"$(nproc)"
+
+      - name: CodeQL analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

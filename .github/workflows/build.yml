@@ -5,15 +5,20 @@
 # Does NOT actually deploy — that's still manual via scripts/deploy.sh.
 #
 # Two parallel build jobs:
-#   build-cssharp  — InsanityRevive (C# / .NET 8 / CSSharp)
-#   build-hider    — InsanityHider (C++ / Metamod:Source / CS2 SDK)
+#   build-cssharp  — InsanityRevive (C# / .NET 8 / CSSharp). Builds twice
+#                    and compares sha256 to enforce reproducibility (the
+#                    "DLL drift" failure mode that bit v0.6.0.7→0.8 and
+#                    v0.6.0.10→0.11 — see scripts/deploy.sh comments).
+#   build-hider    — InsanityHider (C++ / Metamod:Source / CS2 SDK).
 #
-# A `package` job runs on tag pushes only and assembles a single tarball
-# with both halves laid out in their server-relative paths.
+# A `package` job runs on tag pushes only. It assembles a server-relative
+# tarball, attaches it to a GitHub Release, and marks pre-release on tags
+# that contain a hyphen (e.g. v0.7.2-beta).
 #
-# CounterStrikeSharp.API.dll is fetched from the upstream release pinned
-# in CSSHARP_VERSION below. hl2sdk and metamod-source are cloned shallow
-# from upstream (cs2 / master) at build time — both are public.
+# Caches:
+#   - NuGet packages (~/.nuget/packages) keyed on csproj hash.
+#   - hl2sdk + metamod-source clones, keyed on branch + workflow hash so
+#     touching the workflow invalidates them.
 
 name: build
 
@@ -39,7 +44,7 @@ jobs:
   build-cssharp:
     name: InsanityRevive (.NET / CSSharp)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +52,14 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
 
       - name: Fetch CounterStrikeSharp.API.dll (v${{ env.CSSHARP_VERSION }})
         run: |
@@ -61,7 +74,7 @@ jobs:
       - name: dotnet restore
         run: dotnet restore InsanityRevive/InsanityRevive.csproj
 
-      - name: dotnet build (Release, warnings-as-errors)
+      - name: dotnet build (Release, warnings-as-errors) — pass 1
         run: |
           dotnet build InsanityRevive/InsanityRevive.csproj \
             -c Release \
@@ -70,13 +83,34 @@ jobs:
             --nologo \
             -p:CSSharpApiPath="${{ github.workspace }}/.ci/cssharp-api/CounterStrikeSharp.API.dll"
 
-      - name: Compute and surface DLL sha256
+      - name: Capture pass-1 sha256 + stash DLL
         run: |
           dll=InsanityRevive/bin/Release/net8.0/InsanityRevive.dll
           [ -f "$dll" ] || { echo "DLL missing post-build" >&2; exit 1; }
-          sha=$(sha256sum "$dll" | awk '{print $1}')
-          echo "DLL sha256: $sha"
-          echo "DLL_SHA256=$sha" >> "$GITHUB_ENV"
+          sha1=$(sha256sum "$dll" | awk '{print $1}')
+          echo "Pass-1 DLL sha256: $sha1"
+          echo "DLL_SHA256=$sha1" >> "$GITHUB_ENV"
+          mkdir -p .ci/pass1
+          cp "$dll" .ci/pass1/InsanityRevive.dll
+
+      - name: Determinism guard — clean rebuild + compare
+        run: |
+          # Wipe build outputs so MSBuild can't reuse cached intermediates.
+          rm -rf InsanityRevive/bin InsanityRevive/obj
+          dotnet build InsanityRevive/InsanityRevive.csproj \
+            -c Release \
+            -warnaserror \
+            --nologo \
+            -p:CSSharpApiPath="${{ github.workspace }}/.ci/cssharp-api/CounterStrikeSharp.API.dll"
+          dll=InsanityRevive/bin/Release/net8.0/InsanityRevive.dll
+          sha2=$(sha256sum "$dll" | awk '{print $1}')
+          echo "Pass-2 DLL sha256: $sha2"
+          if [ "$sha2" != "$DLL_SHA256" ]; then
+            echo "::error::DLL hash drifted between clean rebuilds: $DLL_SHA256 -> $sha2" >&2
+            echo "Determinism is broken — investigate before deploying." >&2
+            exit 1
+          fi
+          echo "✓ deterministic ($sha2)"
 
       - name: Upload InsanityRevive artifact
         uses: actions/upload-artifact@v4
@@ -102,17 +136,34 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential make
 
+      - name: Cache hl2sdk clone
+        id: cache-hl2sdk
+        uses: actions/cache@v4
+        with:
+          path: InsanityHider/hl2sdk
+          key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Cache metamod-source clone
+        id: cache-mmsource
+        uses: actions/cache@v4
+        with:
+          path: InsanityHider/mmsource
+          key: mmsource-${{ env.MMSOURCE_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+
       - name: Vendor hl2sdk (${{ env.HL2SDK_BRANCH }} branch)
+        if: steps.cache-hl2sdk.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "$HL2SDK_BRANCH" \
             "$HL2SDK_REPO" InsanityHider/hl2sdk
-          # protoc shipped in-tree must be executable.
-          chmod +x InsanityHider/hl2sdk/devtools/bin/linux/protoc || true
 
       - name: Vendor metamod-source (${{ env.MMSOURCE_BRANCH }} branch)
+        if: steps.cache-mmsource.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "$MMSOURCE_BRANCH" \
             "$MMSOURCE_REPO" InsanityHider/mmsource
+
+      - name: Ensure protoc is executable
+        run: chmod +x InsanityHider/hl2sdk/devtools/bin/linux/protoc || true
 
       - name: make
         working-directory: InsanityHider
@@ -137,11 +188,13 @@ jobs:
           retention-days: 14
 
   package:
-    name: package release bundle
+    name: package + release
     runs-on: ubuntu-latest
     needs: [build-cssharp, build-hider]
     if: startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 5
+    permissions:
+      contents: write   # required by softprops/action-gh-release
     steps:
       - uses: actions/checkout@v4
 
@@ -185,12 +238,14 @@ jobs:
           cp out/hider/insanityhider.vdf "$mm_dir/"
 
       - name: Tarball + sha256
+        id: bundle
         run: |
           tag=${GITHUB_REF##*/}
           tar -czf "cs2-insanity-${tag}.tar.gz" -C stage "cs2-insanity-${tag}"
           sha256sum "cs2-insanity-${tag}.tar.gz" | tee "cs2-insanity-${tag}.tar.gz.sha256"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Upload release bundle
+      - name: Upload release bundle artifact
         uses: actions/upload-artifact@v4
         with:
           name: cs2-insanity-${{ github.ref_name }}
@@ -198,3 +253,16 @@ jobs:
             cs2-insanity-*.tar.gz
             cs2-insanity-*.tar.gz.sha256
           retention-days: 90
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # All current tags are -beta / -alpha. A hyphenated tag is
+          # treated as pre-release; clean tags like v1.0.0 publish as
+          # full releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            cs2-insanity-*.tar.gz
+            cs2-insanity-*.tar.gz.sha256

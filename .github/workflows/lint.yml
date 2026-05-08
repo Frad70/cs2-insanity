@@ -1,0 +1,36 @@
+# Whitespace + final-newline lint, enforced by .editorconfig.
+#
+# Cheap, language-agnostic — catches the kind of nits that show up as
+# noise in diffs but don't trip the compiler. C#/C++ style itself is
+# left to the compiler (warnings-as-errors in build.yml).
+
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  whitespace:
+    name: editorconfig (whitespace + final-newline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install editorconfig-checker
+        run: |
+          ver=3.0.3
+          curl -fsSL --retry 4 --retry-delay 4 -o /tmp/ec.tar.gz \
+            "https://github.com/editorconfig-checker/editorconfig-checker/releases/download/v${ver}/ec-linux-amd64.tar.gz"
+          tar -xzf /tmp/ec.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/bin/ec-linux-amd64 /usr/local/bin/ec
+
+      - name: Run editorconfig-checker
+        run: ec -exclude '^\.git/|^claude/chat\.md$'
