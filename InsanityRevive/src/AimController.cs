@@ -40,6 +40,12 @@ public sealed class AimController
     private bool  _armed;
     private int   _lastSlot = -1;  // slot we last wrote to — clear on slot change
 
+    // xorshift32 state for per-bot, per-tick aim noise. Seeded lazily from
+    // BotProfile.Seed so two bots with the same skill/profile don't share
+    // an RNG sequence (which would cluster their misses identically).
+    private uint _rng;
+    private bool _rngSeeded;
+
     /// <summary>How many consecutive ticks of |dLook| ≤ MovementEpsilon before
     /// we stop overriding and let the engine smoother run unmolested.</summary>
     private const int IdleThreshold = 16;  // 0.25 sec at 64 tps
@@ -48,6 +54,15 @@ public sealed class AimController
     /// movement". 0.01° matches the same epsilon AimLookflowProbe uses to
     /// label a tick "idle" in its dump filter.</summary>
     private const float MovementEpsilon = 0.01f;
+
+    /// <summary>Maximum per-axis additive aim error applied to the engine
+    /// target before writing to the override pool. The actual error is scaled
+    /// by (1 − CurrentAimSkill/100), so skill=100 → 0°, skill=50 → 2.5°,
+    /// skill=0 → 5°. Picked to be visibly bad at low skill (a 5° flick miss
+    /// at 30 m is ~2.6 m, full-body offset) but not silly: BT will still
+    /// converge on the player when skill is high. Etap C+ will replace
+    /// uniform noise with per-target scatter and twitch reaction.</summary>
+    private const float MaxAimErrorDeg = 5f;
 
     public bool Armed => _armed;
     public int  IdleTicks => _idleTicks;
@@ -97,15 +112,29 @@ public sealed class AimController
             return;
         }
 
-        // Etap B: identity passthrough. Etap C will fold per-bot aim error
-        // from BotProfile.CurrentAimSkill in here before writing.
-        // Clamp pitch — the engine's m_angEyeAngles X expects [-89, 89]; we
-        // sometimes observe m_lookPitch values like 357.9 (wraparound around
-        // 0), which would fold into "look straight down past the horizon"
-        // when shoved into eye. Yaw is left untouched (any angle valid).
-        float overP = MathF.Max(-89f, MathF.Min(89f, lookP));
-        float overY = lookY;
-        _ = profile;  // unused in Etap B
+        // Etap C: additive uniform aim error scaled by (1 − skill/100).
+        // skill=100 → no noise (perfect aim, identity passthrough);
+        // skill=50  → ±2.5° per axis;
+        // skill=0   → ±5° per axis (visibly bad).
+        // Yaw is the more visible axis (horizontal sway); pitch we
+        // additionally clamp into legal-eye range to avoid wraparound
+        // (engine occasionally reports lookP=357.9-style values).
+        if (!_rngSeeded)
+        {
+            // Mix profile seed with slot so two bots from cloned profiles
+            // (rare but possible) don't get the same noise sequence.
+            ulong s = (profile?.Seed ?? 0xDEADBEEFCAFEBABEUL) ^ ((ulong)(uint)slot << 32) ^ 0xA1B2C3D4E5F60718UL;
+            _rng = (uint)(s ^ (s >> 32));
+            if (_rng == 0) _rng = 0xCAFEBABE;
+            _rngSeeded = true;
+        }
+        float skill = profile?.CurrentAimSkill ?? 50f;
+        float errorFactor = MathF.Max(0f, 1f - skill / 100f);
+        float errorDeg = errorFactor * MaxAimErrorDeg;
+        float noiseP = (NextFloatM1to1()) * errorDeg;
+        float noiseY = (NextFloatM1to1()) * errorDeg;
+        float overP = MathF.Max(-89f, MathF.Min(89f, lookP + noiseP));
+        float overY = lookY + noiseY;
 
         ulong botKey = (ulong)bot.Handle.ToInt64();
         pool.WriteAimSlot(slot, botKey, enabled: true, pitch: overP, yaw: overY);
@@ -129,5 +158,17 @@ public sealed class AimController
         while (d >  180f) d -= 360f;
         while (d < -180f) d += 360f;
         return d;
+    }
+
+    /// <summary>xorshift32 step + map to [-1, 1) float. Allocation-free,
+    /// fine quality for visual aim noise (not crypto). State must be
+    /// nonzero — caller seeds non-zero in Tick.</summary>
+    private float NextFloatM1to1()
+    {
+        _rng ^= _rng << 13;
+        _rng ^= _rng >> 17;
+        _rng ^= _rng << 5;
+        // Use 24 high bits for mantissa precision; map [0, 2^24) → [-1, 1).
+        return (_rng >> 8) * (2f / 16777216f) - 1f;
     }
 }
