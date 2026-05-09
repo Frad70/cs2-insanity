@@ -526,6 +526,7 @@ public sealed class FakeClientManager : IDisposable
         _registry.ReleaseSlot(fc.PersonaId);
         _pool.Write(fc.Slot, 0);  // un-mark so future engine clients aren't accidentally hidden
         _pool.WriteName(fc.Slot, "");
+        fc.Aim.Disarm(_pool);     // release per-slot aim override if armed
         Telemetry.Write("fake_despawn", new Dictionary<string, object?> {
             { "botId", id }, { "personaId", fc.PersonaId }, { "reason", reason },
             { "name", fc.Name }, { "slot", fc.Slot } });
@@ -656,8 +657,8 @@ public sealed class FakeClientManager : IDisposable
         {
             CCSPlayerController? c = null;
             try { c = Utilities.GetPlayerFromSlot(fc.Slot); } catch { }
-            if (c == null || !c.IsValid) { fc.Simulator.Tick(); continue; }
-            fc.Tick(_tick, c);
+            if (c == null || !c.IsValid) { fc.Simulator.Tick(); fc.Aim.Disarm(_pool); continue; }
+            fc.Tick(_tick, c, _pool);
             EmitPerTickTelemetry(fc);
         }
         if (_ticksSinceSummary < 64) return;
