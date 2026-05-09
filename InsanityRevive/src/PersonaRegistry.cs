@@ -151,13 +151,13 @@ public sealed class PersonaRegistry
     {
         var nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 
-        // CONTRACT: `reservedNames` is a set of NORMALIZED keys (NFKC +
-        // lowercase + trim, see FakeClientManager.Normalize). Display
-        // names in the registry preserve original case; we normalize
-        // them here for the lookup so 'kennyS' (registry) collides with
-        // 'KennyS' (human) regardless of how either was capitalized.
-        static string Norm(string s) => string.IsNullOrEmpty(s) ? string.Empty
-            : s.Normalize(System.Text.NormalizationForm.FormKC).Trim().ToLowerInvariant();
+        // CONTRACT: `reservedNames` is a set of NORMALIZED keys produced
+        // by FakeClientManager.Normalize (NFKC + lowercase + Cyrillic→
+        // Latin transliteration + leetspeak digit strip). Display names
+        // in the registry preserve original case; we canonicalize for
+        // lookup so 'kennyS' (registry) collides with 'KennyS' (human)
+        // and 'Нагибатор' (registry) collides with 'Nagibator' (human).
+        static string Norm(string s) => FakeClientManager.Normalize(s);
 
         // (1) Reuse a dormant persona.
         var dormant = OrderForReuse(_byId.Values.Where(p => !p.IsActive))
