@@ -19,21 +19,28 @@
 //   [4516..6051]  AimSlot[64]           = 24 bytes per entry, see below
 // Total = 6052 bytes.
 //
-// AimSlot layout (24 bytes, 8-byte aligned):
-//   [+0..+7]   uint64 bot_key    = CCSBot* pointer (the AI struct, == `this`
-//                                  inside CCSBot::UpdateLookAngles). NOT the
-//                                  CCSPlayerPawn pointer — empirically, the
-//                                  value at CCSBot+0x8 doesn't match what
-//                                  CSSharp returns from pawn.Handle, so we
-//                                  key on ccsbot which both sides agree on.
-//                                  C# obtains it via pawn.Bot.Handle.
-//                                  0 = empty entry. CSSharp sets on adopt,
-//                                  clears on disconnect/respawn.
-//   [+8..+11]  uint32 enabled    = 0: use global (or no override), 1: use
-//                                  this slot's pitch/yaw.
-//   [+12..+15] float  pitch
-//   [+16..+19] float  yaw
-//   [+20..+23] uint32 reserved   = 0 (alignment)
+// AimSlot layout (32 bytes, 8-byte aligned). v7 widened from v6 to add
+// the bt_target_* feedback channel: C++ writes BT's freshly-set
+// m_lookPitch/Yaw each tick (before our override stomp), C# reads it
+// to know BT's intended target without stale-read pollution. Solves
+// the sample/write phase lag — C# can react every tick to fresh BT
+// data instead of caching a target across N ticks.
+//   [+0..+7]   uint64 bot_key          CCSBot* pointer (the AI struct,
+//                                       == `this` inside CCSBot::Update-
+//                                       LookAngles). NOT the CCSPlayer-
+//                                       Pawn pointer — empirically the
+//                                       value at CCSBot+0x8 doesn't match
+//                                       what CSSharp returns from pawn.
+//                                       Handle, so we key on ccsbot which
+//                                       both sides agree on. C# obtains
+//                                       it via pawn.Bot.Handle. 0 =
+//                                       empty entry.
+//   [+8..+11]  uint32 enabled          0: no override, 1: use override
+//   [+12..+15] float  pitch            override pitch (C# writes)
+//   [+16..+19] float  yaw              override yaw (C# writes)
+//   [+20..+23] float  bt_target_pitch  fresh BT m_lookPitch (C++ writes)
+//   [+24..+27] float  bt_target_yaw    fresh BT m_lookYaw   (C++ writes)
+//   [+28..+31] uint32 reserved         0 / alignment
 //
 // AIM OVERRIDE block (v5, 2026-05-08; per-slot extension v6, 2026-05-09):
 //   GLOBAL toggle that the C++ AimHook reads inside CCSBot::UpdateLookAngles
@@ -72,10 +79,10 @@
 namespace InsanityHider {
 
 constexpr uint32_t POOL_MAGIC   = 0x46534E49u;
-constexpr uint32_t POOL_VERSION = 6u;
+constexpr uint32_t POOL_VERSION = 7u;
 constexpr size_t   POOL_SLOTS   = 120;
 constexpr size_t   POOL_AIM_SLOT_COUNT = 64;
-constexpr size_t   POOL_AIM_SLOT_BYTES = 24;
+constexpr size_t   POOL_AIM_SLOT_BYTES = 32;
 
 constexpr size_t POOL_HEADER_BYTES     = 16;
 constexpr size_t POOL_ACTIVE_OFFSET    = 8;
@@ -101,11 +108,13 @@ constexpr size_t POOL_AIM_SLOTS_OFFSET      = POOL_AIM_SLOT_COUNT_OFFSET + 8;   
 
 // AimSlot field offsets relative to the start of an entry.
 // (BOT_KEY rather than PAWN — see layout doc above for rationale.)
-constexpr size_t POOL_AIM_SLOT_BOT_OFFSET     = 0;   // uint64
-constexpr size_t POOL_AIM_SLOT_ENABLED_OFFSET = 8;   // uint32
-constexpr size_t POOL_AIM_SLOT_PITCH_OFFSET   = 12;  // float
-constexpr size_t POOL_AIM_SLOT_YAW_OFFSET     = 16;  // float
-// 20..23 = reserved/alignment
+constexpr size_t POOL_AIM_SLOT_BOT_OFFSET        = 0;   // uint64
+constexpr size_t POOL_AIM_SLOT_ENABLED_OFFSET    = 8;   // uint32
+constexpr size_t POOL_AIM_SLOT_PITCH_OFFSET      = 12;  // float — C# writes
+constexpr size_t POOL_AIM_SLOT_YAW_OFFSET        = 16;  // float — C# writes
+constexpr size_t POOL_AIM_SLOT_BT_PITCH_OFFSET   = 20;  // float — C++ writes BT's m_lookPitch
+constexpr size_t POOL_AIM_SLOT_BT_YAW_OFFSET     = 24;  // float — C++ writes BT's m_lookYaw
+// 28..31 = reserved/alignment
 
 constexpr size_t POOL_TOTAL = POOL_AIM_SLOTS_OFFSET + (POOL_AIM_SLOT_COUNT * POOL_AIM_SLOT_BYTES);  // 6052
 
