@@ -32,6 +32,7 @@ public sealed class FakeClient
     public NetworkSimulator  Simulator   { get; }
     public InputBuffer       Buffer      { get; }
     public PingDisplay       PingView    { get; }
+    public AimController     Aim         { get; } = new();
 
     // 1s rolling stats for net_summary record
     private int _summaryWindowSamples;
@@ -55,7 +56,7 @@ public sealed class FakeClient
 
     // controller is looked up by the Manager once per tick (not cached:
     // entity handles are unstable across respawn / mapchange).
-    public void Tick(int currentTick, CCSPlayerController? controller)
+    public void Tick(int currentTick, CCSPlayerController? controller, PoolMmap? pool)
     {
         Simulator.Tick();
 
@@ -63,6 +64,10 @@ public sealed class FakeClient
 
         PingView.RecordSample(Simulator.CurrentLatencyMs);
         PingView.MaybeWrite(controller);
+
+        // Aim driver — read engine BT's m_lookPitch/Yaw target and forward
+        // to the per-slot pool. Etap B (identity) → bot plays as normal.
+        Aim.Tick(Slot, controller, pool, Profile);
 
         _summaryWindowSamples++;
         _summaryLatencyAcc += Simulator.CurrentLatencyMs;
