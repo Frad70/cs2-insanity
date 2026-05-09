@@ -39,6 +39,14 @@ public:
     // pointer (== `this` in UpdateLookAngles); see pool_format.h note.
     bool LookupPerSlotAim(uint64_t botPtr, float& outPitch, float& outYaw) const;
 
+    // v7 — write BT's freshly-set m_lookPitch/Yaw into the AimSlot's
+    // bt_target fields so C# AimController can read it next tick without
+    // having to read m_lookPitch directly (which we clobber with our
+    // override). Linear scan to find matching entry; if no entry is
+    // registered for this CCSBot, this is a no-op (fine — bots without
+    // C# AimController control don't need the feedback channel).
+    void WriteBotTargetForBot(uint64_t botPtr, float btPitch, float btYaw);
+
     // Writes (writable mmap, v3+).
     void WriteManaged(int slot, uint8_t val);
     void WriteName(int slot, const char* name);

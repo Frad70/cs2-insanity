@@ -33,10 +33,10 @@ namespace InsanityRevive;
 public sealed class PoolMmap : IDisposable
 {
     public const uint Magic            = 0x46534E49u;
-    public const uint Version          = 6u;
+    public const uint Version          = 7u;
     public const int  Slots            = 120;
     public const int  AimSlotCount     = 64;
-    public const int  AimSlotBytes     = 24;
+    public const int  AimSlotBytes     = 32;  // v7 widened from 24 for bt_target_* feedback channel
     public const int  HeaderBytes      = 16;
     public const int  ActiveOffset     = 8;
     public const int  MapchangeOffset  = 12;
@@ -60,8 +60,10 @@ public sealed class PoolMmap : IDisposable
     public const int  AimSlotsOffset     = AimSlotCountOffset + 8;             // 4516 (8B = count + reserved align pad)
     public const int  AimSlotBotOff      = 0;   // uint64 — CCSBot* (== `this` inside UpdateLookAngles, == pawn.Bot.Handle)
     public const int  AimSlotEnabledOff  = 8;
-    public const int  AimSlotPitchOff    = 12;
-    public const int  AimSlotYawOff      = 16;
+    public const int  AimSlotPitchOff    = 12;  // C# writes
+    public const int  AimSlotYawOff      = 16;  // C# writes
+    public const int  AimSlotBtPitchOff  = 20;  // C++ writes BT's m_lookPitch
+    public const int  AimSlotBtYawOff    = 24;  // C++ writes BT's m_lookYaw
 
     public const int  Total              = AimSlotsOffset + (AimSlotCount * AimSlotBytes);  // 6052
 
@@ -217,6 +219,23 @@ public sealed class PoolMmap : IDisposable
         float p   = _va.ReadSingle(baseOff + AimSlotPitchOff);
         float y   = _va.ReadSingle(baseOff + AimSlotYawOff);
         return (key, en, p, y);
+    }
+
+    /// <summary>v7 — read BT's m_lookPitch/Yaw that the C++ handler captured
+    /// last tick (before our override stomped on it). This is the clean
+    /// engine-target value AimController feeds noise on top of, no need to
+    /// disarm and read m_lookPitch directly. Returns NaN if slot has no
+    /// bot_key registered (no entry to read from).</summary>
+    public (float btPitch, float btYaw) ReadBotTarget(int slot)
+    {
+        if (_va == null) return (float.NaN, float.NaN);
+        if (slot < 0 || slot >= AimSlotCount) return (float.NaN, float.NaN);
+        int baseOff = AimSlotsOffset + slot * AimSlotBytes;
+        ulong key = _va.ReadUInt64(baseOff + AimSlotBotOff);
+        if (key == 0) return (float.NaN, float.NaN);
+        float p = _va.ReadSingle(baseOff + AimSlotBtPitchOff);
+        float y = _va.ReadSingle(baseOff + AimSlotBtYawOff);
+        return (p, y);
     }
 
     private void ZeroAimSlots()

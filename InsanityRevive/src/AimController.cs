@@ -1,41 +1,51 @@
 // =============================================================================
-// AimController.cs — per-bot driver for the v6 per-slot aim override pool.
+// AimController.cs — per-bot driver for the v7 per-slot aim override pool.
 //
-// Reads the engine's CCSBot.m_lookPitch/m_lookYaw each tick (proven by
-// AimLookflowProbe to be the BT's intended look target — not a copy of the
-// smoother output) and writes them back into the shared pool's AimSlot[slot]
-// entry. The C++ AimHook PRE-detour reads those values and writes them onto
-// CCSPlayerPawn.m_angEyeAngles, replacing the engine smoother with our value.
+// Architecture (post-2026-05-09 rework, after sample-write phase pattern
+// proved to add unacceptable 110ms aim lag):
 //
-// Etap B (this file's first form): IDENTITY PASSTHROUGH. The override value
-// equals the engine's own target → bot plays exactly as it would without the
-// hook. The point is to verify the read/write loop doesn't break gameplay
-// before we start perturbing values in Etap C (BotProfile-driven aim error).
+//   * Pool layout v7 widened AimSlot from 24 → 32 bytes, adding bt_target_*
+//     fields. C++ AimHook handler captures BT's freshly-set m_lookPitch/Yaw
+//     into those fields BEFORE applying our override.
+//   * AimController reads bt_target_* from the pool each tick — clean BT
+//     target with 1-tick lag (15.6ms @ 64 tps), no stale m_lookPitch issue.
+//   * Computes override = bt_target + per-tick noise scaled by
+//     (1 − CurrentAimSkill/100), writes to AimSlot.
+//   * C++ handler clobbers m_lookPitch/m_angEyeAngles with our override —
+//     smoother body of UpdateLookAngles sees override == lookP and lerps
+//     to a fixed point: bot eye locks to (target + noise).
 //
-// Idle gate: when the bot is not actively redirecting aim (look fields
-// stationary for IdleThreshold consecutive ticks), clear the AimSlot so the
-// engine's smoother runs on its own. Without the gate, an idle bot would
-// have its eye frozen at the last forwarded value forever — fine when look
-// genuinely doesn't move, but if anything in the engine's pipeline updates
-// eye independently of look (it shouldn't, but the slot-0 edge case from
-// the lookflow probe says "don't trust this 100%"), our stale write would
-// fight it.
+// Net effect: bot eye is at BT's intended target offset by noise each tick,
+// reaction lag = 1 tick (essentially imperceptible — humans have 50–250ms
+// reaction lag on aim redirects).
+//
+// Idle gate: when bt_target hasn't changed (BT not redirecting) for
+// IdleThreshold ticks, disarm so the engine smoother runs natural. Avoids
+// freezing eye at a stale target indefinitely.
+//
+// History: identity-passthrough (Etap B) read m_lookPitch directly + had
+// only m_angEyeAngles override → smoother dampened our writes. Sample-write
+// phase pattern (Etap B+) added m_lookPitch override + cached target across
+// SamplePeriod=8 ticks → bots played with 110ms reaction lag, kennyS skill=95
+// fragged less than donk skill=51 because lag dominated noise advantage.
+// v7 feedback-channel design: 1-tick lag, full noise effect, full lock.
 // =============================================================================
 
 using System;
-using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Memory;
 
 namespace InsanityRevive;
 
 public sealed class AimController
 {
-    private static int _lookPOff = -1;
-    private static int _lookYOff = -1;
+    /// <summary>Global off-switch. When true, all AimControllers no-op
+    /// in Tick. Useful for diagnostic — set via rcon to test perslot
+    /// override in isolation without our identity-passthrough writes
+    /// stomping on it.</summary>
+    public static bool GlobalDisable { get; set; } = false;
 
-    private float _prevLookP;
-    private float _prevLookY;
+    private float _prevBtP;
+    private float _prevBtY;
     private int   _idleTicks;
     private bool  _armed;
     private int   _lastSlot = -1;  // slot we last wrote to — clear on slot change
@@ -46,13 +56,16 @@ public sealed class AimController
     private uint _rng;
     private bool _rngSeeded;
 
-    /// <summary>How many consecutive ticks of |dLook| ≤ MovementEpsilon before
-    /// we stop overriding and let the engine smoother run unmolested.</summary>
-    private const int IdleThreshold = 16;  // 0.25 sec at 64 tps
+    /// <summary>How many consecutive ticks of |dBtTarget| ≤ MovementEpsilon
+    /// before we disarm and let the engine smoother run unmolested.
+    /// 32 ticks = 0.5 sec @ 64 tps. Bot needs to be holding a steady aim
+    /// for half a second before we let go — picks up active tracking
+    /// (constantly redirecting) but releases on standing-around-spawn.</summary>
+    private const int IdleThreshold = 32;
 
-    /// <summary>Threshold below which a per-axis tick delta counts as "no
-    /// movement". 0.01° matches the same epsilon AimLookflowProbe uses to
-    /// label a tick "idle" in its dump filter.</summary>
+    /// <summary>Threshold below which a per-tick BT-target delta counts as
+    /// "no movement". 0.01° matches the same epsilon AimLookflowProbe uses
+    /// for "idle" classification.</summary>
     private const float MovementEpsilon = 0.01f;
 
     /// <summary>Maximum per-axis additive aim error applied to the engine
@@ -69,14 +82,10 @@ public sealed class AimController
 
     /// <summary>Drive one tick. Pool may be null (early boot before manager
     /// owns its mmap); in that case do nothing — the engine smoother runs.</summary>
-    public unsafe void Tick(int slot, CCSPlayerController? ctrl, PoolMmap? pool, BotProfile? profile)
+    public void Tick(int slot, CCSPlayerController? ctrl, PoolMmap? pool, BotProfile? profile)
     {
+        if (GlobalDisable) { Disarm(pool); return; }
         if (pool == null || !pool.IsOpen) { _armed = false; return; }
-        if (_lookPOff < 0)
-        {
-            _lookPOff = Schema.GetSchemaOffset("CCSBot", "m_lookPitch");
-            _lookYOff = Schema.GetSchemaOffset("CCSBot", "m_lookYaw");
-        }
         // Ctrl + pawn + bot all have to be live; bots in spec / mid-respawn
         // briefly drop out and we should disarm so the engine takes over.
         if (ctrl == null || !ctrl.IsValid) { Disarm(pool); return; }
@@ -94,31 +103,47 @@ public sealed class AimController
         }
         _lastSlot = slot;
 
-        float lookP = *(float*)((byte*)bot.Handle.ToPointer() + _lookPOff);
-        float lookY = *(float*)((byte*)bot.Handle.ToPointer() + _lookYOff);
+        ulong botKey = (ulong)bot.Handle.ToInt64();
 
-        float dP = lookP - _prevLookP;
-        float dY = AngleDelta(lookY, _prevLookY);
-        _prevLookP = lookP;
-        _prevLookY = lookY;
+        // Make sure the bot_key is registered in the pool BEFORE the C++
+        // handler tries to write bt_target into our slot. WriteAimSlot
+        // with a placeholder enabled=false override establishes the entry;
+        // we'll then read bt_target back. On the very first tick of a
+        // bot's life, bt_target won't exist yet — handle the NaN case below.
+        if (!_armed)
+        {
+            pool.WriteAimSlot(slot, botKey, enabled: false, pitch: 0f, yaw: 0f);
+        }
+
+        // Read BT's intended target via the v7 feedback channel — populated
+        // by the C++ handler last tick (or this tick, depending on tick
+        // ordering between UpdateLookAngles and CSSharp.OnTick).
+        var (btP, btY) = pool.ReadBotTarget(slot);
+        if (float.IsNaN(btP) || float.IsNaN(btY))
+        {
+            // First tick — no BT target captured yet. Skip; next tick
+            // we'll have one.
+            return;
+        }
+        btP = NormalizeAngle(btP);  // m_lookPitch sometimes wraparound
+
+        // Idle gate — track whether BT is actively redirecting aim.
+        float dP = btP - _prevBtP;
+        float dY = AngleDelta(btY, _prevBtY);
+        _prevBtP = btP;
+        _prevBtY = btY;
         if (MathF.Abs(dP) < MovementEpsilon && MathF.Abs(dY) < MovementEpsilon)
             _idleTicks++;
         else
             _idleTicks = 0;
-
         if (_idleTicks >= IdleThreshold)
         {
             Disarm(pool);
             return;
         }
 
-        // Etap C: additive uniform aim error scaled by (1 − skill/100).
-        // skill=100 → no noise (perfect aim, identity passthrough);
-        // skill=50  → ±2.5° per axis;
-        // skill=0   → ±5° per axis (visibly bad).
-        // Yaw is the more visible axis (horizontal sway); pitch we
-        // additionally clamp into legal-eye range to avoid wraparound
-        // (engine occasionally reports lookP=357.9-style values).
+        // Apply skill-scaled noise. skill=100 → 0° (perfect);
+        // skill=50 → ±MaxAimErrorDeg/2; skill=0 → ±MaxAimErrorDeg.
         if (!_rngSeeded)
         {
             // Mix profile seed with slot so two bots from cloned profiles
@@ -131,12 +156,11 @@ public sealed class AimController
         float skill = profile?.CurrentAimSkill ?? 50f;
         float errorFactor = MathF.Max(0f, 1f - skill / 100f);
         float errorDeg = errorFactor * MaxAimErrorDeg;
-        float noiseP = (NextFloatM1to1()) * errorDeg;
-        float noiseY = (NextFloatM1to1()) * errorDeg;
-        float overP = MathF.Max(-89f, MathF.Min(89f, lookP + noiseP));
-        float overY = lookY + noiseY;
+        float noiseP = NextFloatM1to1() * errorDeg;
+        float noiseY = NextFloatM1to1() * errorDeg;
+        float overP = MathF.Max(-89f, MathF.Min(89f, btP + noiseP));
+        float overY = btY + noiseY;
 
-        ulong botKey = (ulong)bot.Handle.ToInt64();
         pool.WriteAimSlot(slot, botKey, enabled: true, pitch: overP, yaw: overY);
         _armed = true;
     }
@@ -158,6 +182,17 @@ public sealed class AimController
         while (d >  180f) d -= 360f;
         while (d < -180f) d += 360f;
         return d;
+    }
+
+    /// <summary>Fold any angle into [-180, 180]. Used on lookP before
+    /// pitch-clamp so wraparound values (e.g. 357° meaning -3°) don't
+    /// fold to ±89° straight up/down after Min/Max.</summary>
+    private static float NormalizeAngle(float a)
+    {
+        float n = a;
+        while (n >  180f) n -= 360f;
+        while (n < -180f) n += 360f;
+        return n;
     }
 
     /// <summary>xorshift32 step + map to [-1, 1) float. Allocation-free,

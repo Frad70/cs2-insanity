@@ -181,6 +181,20 @@ bool Pool::LookupPerSlotAim(uint64_t botPtr, float& outPitch, float& outYaw) con
     return false;
 }
 
+void Pool::WriteBotTargetForBot(uint64_t botPtr, float btPitch, float btYaw) {
+    if (!m_pBase || botPtr == 0) return;
+    auto* base = reinterpret_cast<uint8_t*>(m_pBase) + POOL_AIM_SLOTS_OFFSET;
+    for (size_t i = 0; i < POOL_AIM_SLOT_COUNT; i++) {
+        auto* entry = base + i * POOL_AIM_SLOT_BYTES;
+        uint64_t k;
+        memcpy(&k, entry + POOL_AIM_SLOT_BOT_OFFSET, sizeof(k));
+        if (k != botPtr) continue;
+        memcpy(entry + POOL_AIM_SLOT_BT_PITCH_OFFSET, &btPitch, sizeof(btPitch));
+        memcpy(entry + POOL_AIM_SLOT_BT_YAW_OFFSET,   &btYaw,   sizeof(btYaw));
+        return;
+    }
+}
+
 bool Pool::PopFifo(char* outBuf, size_t outBufBytes) {
     if (!m_pBase || !outBuf || outBufBytes == 0) return false;
     auto* base = reinterpret_cast<uint8_t*>(m_pBase);

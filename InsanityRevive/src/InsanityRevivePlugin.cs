@@ -508,6 +508,17 @@ public sealed class InsanityRevivePlugin : BasePlugin
         info.ReplyToCommand($"[aimdiag] enabled={on} budget={AimDiag.LogsRemaining}");
     }
 
+    [ConsoleCommand("insanity_aim_disable",
+        "Toggle AimController identity-passthrough+noise globally for diagnostic")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 0, usage: "[on|off]")]
+    public void OnAimDisable(CCSPlayerController? caller, CommandInfo info)
+    {
+        bool off = info.ArgCount >= 2 && info.GetArg(1).Trim().ToLowerInvariant() is "on" or "true" or "1";
+        AimController.GlobalDisable = off;
+        info.ReplyToCommand($"[aim] AimController disabled = {off}  (ON = AimController.Tick no-ops, manual perslot writes survive)");
+    }
+
     [ConsoleCommand("insanity_aim_perslot",
         "Per-slot aim override: writes pawn ptr + (pitch, yaw) into pool AimSlot[slot]; only that bot turns")]
     [RequiresPermissions("@css/cheats")]

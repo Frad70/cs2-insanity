@@ -282,6 +282,17 @@ extern "C" void aim_hook_handler(void* ccsbot) {
     void* pawn = nullptr;
     memcpy(&pawn, base + InsanityHider::CCSBOT_PLAYER_PTR_OFFSET, sizeof(pawn));
 
+    // v7 feedback channel: capture BT's freshly-set m_lookPitch/Yaw BEFORE
+    // we clobber them with our override. C# AimController reads these from
+    // the pool next tick — guaranteed clean BT-target with no need for the
+    // sample-write phase pattern that introduced 110ms aim lag (verified
+    // 2026-05-09: kennyS skill=95 was bottom-of-the-fragboard with that
+    // pattern because the lag stalled reaction more than the 0.25° noise
+    // advantage helped).
+    float btPitch = *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_PITCH_OFFSET);
+    float btYaw   = *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_YAW_OFFSET);
+    pool->WriteBotTargetForBot(reinterpret_cast<uint64_t>(ccsbot), btPitch, btYaw);
+
     // Per-slot first: if CSSharp registered an AimSlot keyed on this CCSBot,
     // use its (pitch, yaw). Else fall back to the global override.
     // Key is the CCSBot pointer (== `this` here, == pawn.Bot.Handle on C#),
@@ -310,19 +321,26 @@ extern "C" void aim_hook_handler(void* ccsbot) {
         }
     }
 
-    // (1) Write m_lookPitch / m_lookYaw on CCSBot. AimDiag (2026-05-08)
-    // showed these are REPORT-only relative to shoot trajectory — bullets
-    // don't follow them. Kept for visual model orientation (third-person
-    // model rotates from these) and for symmetry with reading them in
-    // AimLookflowProbe to confirm engine target piggyback.
+    // (1) Write CCSBot.m_lookPitch / m_lookYaw. Required to lock — verified
+    // 2026-05-09: writing only m_angEyeAngles let the smoother body of
+    // UpdateLookAngles immediately undo our write (eye lerp'd back toward
+    // BT's m_lookPitch within smoother alpha each tick → user reported
+    // "ZywOo не смотрит в пол" when we manually locked at pitch=70).
+    //
+    // The feedback-loop concern (C# AimController reads m_lookPitch and
+    // sees our own write) is solved on the C# side by a SAMPLE / WRITE
+    // phase pattern — AimController disarms its AimSlot every N ticks
+    // for one tick, letting BT write m_lookPitch cleanly, samples it on
+    // the next tick, then re-arms with target + noise for the next N-1
+    // ticks. So m_lookPitch is BT-owned during sample phase and ours
+    // during write phase. Drift is bounded; visible aim error is full.
     *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_PITCH_OFFSET) = pitch;
     *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_YAW_OFFSET)   = yaw;
 
-    // (2) Write CCSPlayerPawn.m_angEyeAngles via the player pointer at
-    // CCSBot+0x8. This is the actual shoot-direction source per AimDiag
-    // (bullet trajectory matched m_angEyeAngles within ~1° in 30/30 fires).
-    // PRE-UpdateLookAngles fires BEFORE the per-tick shoot trace reads this
-    // field, so our write propagates to bullet direction.
+    // (2) Write CCSPlayerPawn.m_angEyeAngles. Per AimDiag (2026-05-08),
+    // bullet trajectory matched this field within ~1° in 30/30 fires.
+    // PRE-UpdateLookAngles runs BEFORE the per-tick shoot trace reads it,
+    // so our write propagates to bullet direction.
     if (pawn) {
         auto* p = reinterpret_cast<unsigned char*>(pawn);
         // QAngle = 3 floats: pitch (X), yaw (Y), roll (Z=0).
