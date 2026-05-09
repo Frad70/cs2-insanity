@@ -508,6 +508,79 @@ public sealed class InsanityRevivePlugin : BasePlugin
         info.ReplyToCommand($"[aimdiag] enabled={on} budget={AimDiag.LogsRemaining}");
     }
 
+    [ConsoleCommand("insanity_aim_perslot",
+        "Per-slot aim override: writes pawn ptr + (pitch, yaw) into pool AimSlot[slot]; only that bot turns")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 1, usage: "<slot> <pitch> <yaw>  |  <slot> off  |  status")]
+    public void OnAimPerSlot(CCSPlayerController? caller, CommandInfo info)
+    {
+        if (_manager == null) { info.ReplyToCommand("[Insanity] not loaded"); return; }
+        var pool = _manager.GetPool();
+        if (pool == null || !pool.IsOpen) { info.ReplyToCommand("[aimperslot] pool not open"); return; }
+
+        var first = info.GetArg(1).Trim().ToLowerInvariant();
+        if (first == "status")
+        {
+            int active = 0;
+            for (int i = 0; i < PoolMmap.AimSlotCount; i++)
+            {
+                var (key, en, p, y) = pool.ReadAimSlot(i);
+                if (key == 0 && !en) continue;
+                info.ReplyToCommand($"  slot={i} botKey=0x{key:X} enabled={en} pitch={p:F1} yaw={y:F1}");
+                active++;
+            }
+            info.ReplyToCommand($"[aimperslot] {active} slot(s) populated");
+            return;
+        }
+
+        if (!int.TryParse(first, out var slot) || slot < 0 || slot >= PoolMmap.AimSlotCount)
+        {
+            info.ReplyToCommand("[aimperslot] usage: insanity_aim_perslot <slot> <pitch> <yaw> | <slot> off | status");
+            return;
+        }
+
+        var ctrl = Utilities.GetPlayerFromSlot(slot);
+        if (ctrl == null || !ctrl.IsValid)
+        {
+            info.ReplyToCommand($"[aimperslot] slot {slot} has no controller");
+            return;
+        }
+        var pawn = ctrl.PlayerPawn?.Value;
+        if (pawn == null || !pawn.IsValid)
+        {
+            info.ReplyToCommand($"[aimperslot] slot {slot} pawn invalid");
+            return;
+        }
+        // Pool key is the CCSBot pointer (matches `this` inside the C++
+        // AimHook PRE-detour). pawn.Handle would be the wrong key — see
+        // aim_hook.cpp comment near LookupPerSlotAim call.
+        var bot = pawn.Bot;
+        if (bot == null || bot.Handle == IntPtr.Zero)
+        {
+            info.ReplyToCommand($"[aimperslot] slot {slot} bot is null (real CCSBot AI not present)");
+            return;
+        }
+        ulong botKey = (ulong)bot.Handle.ToInt64();
+
+        if (info.ArgCount >= 3 && info.GetArg(2).Trim().ToLowerInvariant() is "off" or "clear" or "none")
+        {
+            pool.ClearAimSlot(slot);
+            info.ReplyToCommand($"[aimperslot] cleared slot {slot}");
+            return;
+        }
+
+        if (info.ArgCount < 4
+            || !float.TryParse(info.GetArg(2), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var pitch)
+            || !float.TryParse(info.GetArg(3), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var yaw))
+        {
+            info.ReplyToCommand("[aimperslot] usage: insanity_aim_perslot <slot> <pitch> <yaw>");
+            return;
+        }
+        pitch = Math.Clamp(pitch, -89f, 89f);
+        pool.WriteAimSlot(slot, botKey, enabled: true, pitch: pitch, yaw: yaw);
+        info.ReplyToCommand($"[aimperslot] slot={slot} botKey=0x{botKey:X} pitch={pitch:F1} yaw={yaw:F1}");
+    }
+
     [ConsoleCommand("insanity_probe_lookflow",
         "Capture per-tick m_lookPitch/Yaw + m_angEyeAngles for one bot to discriminate engine-target vs smoother-output")]
     [RequiresPermissions("@css/cheats")]
