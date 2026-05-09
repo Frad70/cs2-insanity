@@ -26,11 +26,18 @@ public:
     const char* GetName(int slot) const;
 
     // v5 aim-override block. CSSharp WRITES; C++ READS in the AimHook
-    // PRE-detour. Single global pair for now; per-slot is a future
-    // extension. See pool_format.h for the byte layout.
+    // PRE-detour. v5 is a single global pair (pitch/yaw applies to every
+    // bot). v6 added per-slot — see LookupPerSlotAim below.
     bool  IsAimOverrideEnabled() const;
     float GetAimPitch() const;
     float GetAimYaw() const;
+
+    // v6 per-slot aim override. Linear scan over POOL_AIM_SLOT_COUNT
+    // entries looking for AimSlot.bot_key == botPtr AND enabled=1.
+    // On match, writes pitch/yaw and returns true. Otherwise returns
+    // false and leaves outPitch/outYaw untouched. Key is the CCSBot
+    // pointer (== `this` in UpdateLookAngles); see pool_format.h note.
+    bool LookupPerSlotAim(uint64_t botPtr, float& outPitch, float& outYaw) const;
 
     // Writes (writable mmap, v3+).
     void WriteManaged(int slot, uint8_t val);

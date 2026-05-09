@@ -163,6 +163,24 @@ float Pool::GetAimYaw() const {
     return v;
 }
 
+bool Pool::LookupPerSlotAim(uint64_t botPtr, float& outPitch, float& outYaw) const {
+    if (!m_pBase || botPtr == 0) return false;
+    auto* base = reinterpret_cast<const uint8_t*>(m_pBase) + POOL_AIM_SLOTS_OFFSET;
+    for (size_t i = 0; i < POOL_AIM_SLOT_COUNT; i++) {
+        auto* entry = base + i * POOL_AIM_SLOT_BYTES;
+        uint64_t k;
+        memcpy(&k, entry + POOL_AIM_SLOT_BOT_OFFSET, sizeof(k));
+        if (k != botPtr) continue;
+        uint32_t en;
+        memcpy(&en, entry + POOL_AIM_SLOT_ENABLED_OFFSET, sizeof(en));
+        if (en == 0) return false;
+        memcpy(&outPitch, entry + POOL_AIM_SLOT_PITCH_OFFSET, sizeof(outPitch));
+        memcpy(&outYaw,   entry + POOL_AIM_SLOT_YAW_OFFSET,   sizeof(outYaw));
+        return true;
+    }
+    return false;
+}
+
 bool Pool::PopFifo(char* outBuf, size_t outBufBytes) {
     if (!m_pBase || !outBuf || outBufBytes == 0) return false;
     auto* base = reinterpret_cast<uint8_t*>(m_pBase);

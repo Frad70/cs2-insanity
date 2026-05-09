@@ -276,17 +276,45 @@ extern "C" void aim_hook_handler(void* ccsbot) {
     if (!ccsbot) return;
 
     auto* pool = g_Plugin.GetPool();
-    if (!pool || !pool->IsAimOverrideEnabled()) return;
-
-    float pitch = pool->GetAimPitch();
-    float yaw   = pool->GetAimYaw();
+    if (!pool) return;
 
     auto* base = reinterpret_cast<unsigned char*>(ccsbot);
+    void* pawn = nullptr;
+    memcpy(&pawn, base + InsanityHider::CCSBOT_PLAYER_PTR_OFFSET, sizeof(pawn));
 
-    // (1) Write m_lookPitch / m_lookYaw on CCSBot. This is what the spec
-    // hypothesised would steer aim. AimDiag (2026-05-08) showed that
-    // m_lookPitch/Yaw is REPORT-only relative to shoot trajectory — bullets
-    // don't follow it. Kept for completeness so future debugging can A/B.
+    // Per-slot first: if CSSharp registered an AimSlot keyed on this CCSBot,
+    // use its (pitch, yaw). Else fall back to the global override.
+    // Key is the CCSBot pointer (== `this` here, == pawn.Bot.Handle on C#),
+    // NOT the CCSPlayerPawn pointer — empirically the value at CCSBot+0x8
+    // doesn't match what CSSharp returns from pawn.Handle (different memory
+    // region, different object identity), even though writing to it at
+    // +m_angEyeAngles offset has visual effect.
+    float pitch, yaw;
+    bool haveOverride = false;
+    bool fromPerSlot = false;
+    haveOverride = pool->LookupPerSlotAim(reinterpret_cast<uint64_t>(ccsbot), pitch, yaw);
+    fromPerSlot = haveOverride;
+    if (!haveOverride) {
+        if (!pool->IsAimOverrideEnabled()) return;
+        pitch = pool->GetAimPitch();
+        yaw   = pool->GetAimYaw();
+    }
+    // First-fire diagnostic: print when a per-slot override matches a pawn.
+    // Goes silent after first hit per-process to avoid log flood.
+    static std::atomic<bool> g_PerSlotLogged{false};
+    if (fromPerSlot) {
+        bool expected = false;
+        if (g_PerSlotLogged.compare_exchange_strong(expected, true)) {
+            META_CONPRINTF("[AimHook] perslot MATCH pawn=%p pitch=%.2f yaw=%.2f (further matches not logged)\n",
+                           pawn, pitch, yaw);
+        }
+    }
+
+    // (1) Write m_lookPitch / m_lookYaw on CCSBot. AimDiag (2026-05-08)
+    // showed these are REPORT-only relative to shoot trajectory — bullets
+    // don't follow them. Kept for visual model orientation (third-person
+    // model rotates from these) and for symmetry with reading them in
+    // AimLookflowProbe to confirm engine target piggyback.
     *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_PITCH_OFFSET) = pitch;
     *reinterpret_cast<float*>(base + InsanityHider::CCSBOT_LOOK_YAW_OFFSET)   = yaw;
 
@@ -294,9 +322,7 @@ extern "C" void aim_hook_handler(void* ccsbot) {
     // CCSBot+0x8. This is the actual shoot-direction source per AimDiag
     // (bullet trajectory matched m_angEyeAngles within ~1° in 30/30 fires).
     // PRE-UpdateLookAngles fires BEFORE the per-tick shoot trace reads this
-    // field, so our write should propagate to bullet direction.
-    void* pawn = nullptr;
-    memcpy(&pawn, base + InsanityHider::CCSBOT_PLAYER_PTR_OFFSET, sizeof(pawn));
+    // field, so our write propagates to bullet direction.
     if (pawn) {
         auto* p = reinterpret_cast<unsigned char*>(pawn);
         // QAngle = 3 floats: pitch (X), yaw (Y), roll (Z=0).

@@ -1,8 +1,8 @@
 // Shared layout for /tmp/insanityrevive_fake_slots.bin.
 //
-// Layout v5 (was v4 with aim-override block appended):
+// Layout v6 (was v5; appended AimSlot[64] block for per-slot aim override):
 //   [   0..   3]  uint32 magic          = 'INSF' = 0x46534E49
-//   [   4..   7]  uint32 version        = 5
+//   [   4..   7]  uint32 version        = 6
 //   [   8..  11]  uint32 activeFlag     = kill-switch (0/1) — hider on/off
 //   [  12..  15]  uint32 mapchangeFlag  = mapchange in progress (0/1)
 //   [  16.. 135]  uint8 managed[120]    = per-slot management bit
@@ -13,14 +13,43 @@
 //   [4496..4499]  uint32 aimOverrideEn  = global aim-override enabled (0/1)
 //   [4500..4503]  float  aimOverridePitch
 //   [4504..4507]  float  aimOverrideYaw
-// Total = 4508 bytes.
+//   [4508..4511]  uint32 aimSlotCount   = 64 (compile-time constant — fewer
+//                                          rounds-up to mmap page anyway)
+//   [4512..4515]  uint32 reserved       = 0 (alignment to 8B for the array)
+//   [4516..6051]  AimSlot[64]           = 24 bytes per entry, see below
+// Total = 6052 bytes.
 //
-// AIM OVERRIDE block (v5, 2026-05-08):
+// AimSlot layout (24 bytes, 8-byte aligned):
+//   [+0..+7]   uint64 bot_key    = CCSBot* pointer (the AI struct, == `this`
+//                                  inside CCSBot::UpdateLookAngles). NOT the
+//                                  CCSPlayerPawn pointer — empirically, the
+//                                  value at CCSBot+0x8 doesn't match what
+//                                  CSSharp returns from pawn.Handle, so we
+//                                  key on ccsbot which both sides agree on.
+//                                  C# obtains it via pawn.Bot.Handle.
+//                                  0 = empty entry. CSSharp sets on adopt,
+//                                  clears on disconnect/respawn.
+//   [+8..+11]  uint32 enabled    = 0: use global (or no override), 1: use
+//                                  this slot's pitch/yaw.
+//   [+12..+15] float  pitch
+//   [+16..+19] float  yaw
+//   [+20..+23] uint32 reserved   = 0 (alignment)
+//
+// AIM OVERRIDE block (v5, 2026-05-08; per-slot extension v6, 2026-05-09):
 //   GLOBAL toggle that the C++ AimHook reads inside CCSBot::UpdateLookAngles
 //   PRE-detour. When enabled, every CCSBot's m_lookPitch/m_lookYaw is forced
 //   to (aimOverridePitch, aimOverrideYaw) before the engine smoother runs.
-//   Per-slot override is a future extension — this v1 is a single global pair
-//   for the diagnostic "does the hook actually steer aim?" probe.
+//
+//   v6 adds per-slot AimSlot[64]. Handler resolution order:
+//     (1) Read pawn ptr from CCSBot+0x8.
+//     (2) Linear scan AimSlot[0..63]. If pawn_key matches AND enabled=1,
+//         use that slot's (pitch, yaw).
+//     (3) Else if global aimOverrideEn=1, use global (pitch, yaw).
+//     (4) Else no override, fall through to engine smoother.
+//
+//   Linear scan over 64 entries is one cache-line of pawn_keys plus a few
+//   more — hundreds of cycles per fire, run on the game tick thread which
+//   is already inside CCSBot::UpdateLookAngles. Negligible.
 //
 //   CSSharp WRITES; C++ READS. No race: CSSharp updates these fields from a
 //   single rcon command handler on the game tick thread, the C++ side reads
@@ -43,8 +72,10 @@
 namespace InsanityHider {
 
 constexpr uint32_t POOL_MAGIC   = 0x46534E49u;
-constexpr uint32_t POOL_VERSION = 5u;
+constexpr uint32_t POOL_VERSION = 6u;
 constexpr size_t   POOL_SLOTS   = 120;
+constexpr size_t   POOL_AIM_SLOT_COUNT = 64;
+constexpr size_t   POOL_AIM_SLOT_BYTES = 24;
 
 constexpr size_t POOL_HEADER_BYTES     = 16;
 constexpr size_t POOL_ACTIVE_OFFSET    = 8;
@@ -59,12 +90,24 @@ constexpr size_t POOL_FIFO_BYTES       = POOL_FIFO_CAPACITY * POOL_NAME_BYTES;  
 constexpr size_t POOL_FIFO_HEAD_OFFSET = POOL_FIFO_OFFSET + POOL_FIFO_BYTES;                 // 4488
 constexpr size_t POOL_FIFO_TAIL_OFFSET = POOL_FIFO_HEAD_OFFSET + 4;                          // 4492
 
-// v5 aim-override block.
+// v5 aim-override block (global single pair).
 constexpr size_t POOL_AIM_OVERRIDE_EN_OFFSET    = POOL_FIFO_TAIL_OFFSET + 4;  // 4496
 constexpr size_t POOL_AIM_OVERRIDE_PITCH_OFFSET = POOL_AIM_OVERRIDE_EN_OFFSET + 4;  // 4500
 constexpr size_t POOL_AIM_OVERRIDE_YAW_OFFSET   = POOL_AIM_OVERRIDE_PITCH_OFFSET + 4;  // 4504
 
-constexpr size_t POOL_TOTAL = POOL_AIM_OVERRIDE_YAW_OFFSET + 4;  // 4508
+// v6 per-slot aim-override array. Handler scans for matching pawn_key.
+constexpr size_t POOL_AIM_SLOT_COUNT_OFFSET = POOL_AIM_OVERRIDE_YAW_OFFSET + 4;     // 4508
+constexpr size_t POOL_AIM_SLOTS_OFFSET      = POOL_AIM_SLOT_COUNT_OFFSET + 8;       // 4516 (skip 8B for count + reserved alignment pad)
+
+// AimSlot field offsets relative to the start of an entry.
+// (BOT_KEY rather than PAWN — see layout doc above for rationale.)
+constexpr size_t POOL_AIM_SLOT_BOT_OFFSET     = 0;   // uint64
+constexpr size_t POOL_AIM_SLOT_ENABLED_OFFSET = 8;   // uint32
+constexpr size_t POOL_AIM_SLOT_PITCH_OFFSET   = 12;  // float
+constexpr size_t POOL_AIM_SLOT_YAW_OFFSET     = 16;  // float
+// 20..23 = reserved/alignment
+
+constexpr size_t POOL_TOTAL = POOL_AIM_SLOTS_OFFSET + (POOL_AIM_SLOT_COUNT * POOL_AIM_SLOT_BYTES);  // 6052
 
 // CCSBot field offsets (libserver.so 2026-05-08, BuildID 60c3c87436...).
 // Used by aim_hook.cpp to write override values into the bot AI struct.

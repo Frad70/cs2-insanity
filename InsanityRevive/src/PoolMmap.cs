@@ -33,8 +33,10 @@ namespace InsanityRevive;
 public sealed class PoolMmap : IDisposable
 {
     public const uint Magic            = 0x46534E49u;
-    public const uint Version          = 5u;
+    public const uint Version          = 6u;
     public const int  Slots            = 120;
+    public const int  AimSlotCount     = 64;
+    public const int  AimSlotBytes     = 24;
     public const int  HeaderBytes      = 16;
     public const int  ActiveOffset     = 8;
     public const int  MapchangeOffset  = 12;
@@ -50,7 +52,18 @@ public sealed class PoolMmap : IDisposable
     public const int  AimOverrideEnOffset    = FifoTailOffset + 4;             // 4496
     public const int  AimOverridePitchOffset = AimOverrideEnOffset + 4;        // 4500
     public const int  AimOverrideYawOffset   = AimOverridePitchOffset + 4;     // 4504
-    public const int  Total            = AimOverrideYawOffset + 4;             // 4508
+
+    // v6 per-slot aim block. C++ scans AimSlot[64] looking for a matching
+    // pawn pointer; if enabled bit set on that entry, uses its pitch/yaw,
+    // else falls back to the global override above.
+    public const int  AimSlotCountOffset = AimOverrideYawOffset + 4;           // 4508
+    public const int  AimSlotsOffset     = AimSlotCountOffset + 8;             // 4516 (8B = count + reserved align pad)
+    public const int  AimSlotBotOff      = 0;   // uint64 — CCSBot* (== `this` inside UpdateLookAngles, == pawn.Bot.Handle)
+    public const int  AimSlotEnabledOff  = 8;
+    public const int  AimSlotPitchOff    = 12;
+    public const int  AimSlotYawOff      = 16;
+
+    public const int  Total              = AimSlotsOffset + (AimSlotCount * AimSlotBytes);  // 6052
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _va;
@@ -87,6 +100,7 @@ public sealed class PoolMmap : IDisposable
                 ZeroManaged();
                 ZeroNames();
                 ZeroFifo();
+                ZeroAimSlots();
             }
             else
             {
@@ -96,6 +110,7 @@ public sealed class PoolMmap : IDisposable
                 ZeroManaged();
                 ZeroNames();
                 ZeroFifo();
+                ZeroAimSlots();
             }
             Log.Info($"PoolMmap opened: {path} (v{Version}, {Slots} slots, active=1, mapchange=0)");
             return true;
@@ -155,6 +170,60 @@ public sealed class PoolMmap : IDisposable
         float p = _va.ReadSingle(AimOverridePitchOffset);
         float y = _va.ReadSingle(AimOverrideYawOffset);
         return (en, p, y);
+    }
+
+    // v6 per-slot aim accessors. Slot index here is [0..AimSlotCount-1] —
+    // we use the game's player slot (0..63) directly to keep the mapping
+    // trivial in C# code. C++ side scans linearly looking for matching
+    // bot_key, so the index is irrelevant to the hot path. Key is the
+    // CCSBot* (== pawn.Bot.Handle, == `this` inside the hook handler) —
+    // not pawn.Handle (see pool_format.h note for why).
+    public void WriteAimSlot(int slot, ulong botKey, bool enabled, float pitch, float yaw)
+    {
+        if (_va == null) return;
+        if (slot < 0 || slot >= AimSlotCount) return;
+        int baseOff = AimSlotsOffset + slot * AimSlotBytes;
+        // Order matters: write the enable LAST (after bot_key + body) so a
+        // racing C++ reader can never see enabled=1 with stale body fields.
+        // Both sides on the same game tick thread in normal flow, but the
+        // discipline costs nothing.
+        _va.Write(baseOff + AimSlotPitchOff, pitch);
+        _va.Write(baseOff + AimSlotYawOff,   yaw);
+        _va.Write(baseOff + AimSlotBotOff,   botKey);
+        Thread.MemoryBarrier();
+        _va.Write(baseOff + AimSlotEnabledOff, enabled ? 1u : 0u);
+    }
+
+    /// <summary>Clear the AimSlot at <paramref name="slot"/> — disables and
+    /// zeroes bot_key so a future stale-pointer collision can't trigger an
+    /// override on a recycled CCSBot.</summary>
+    public void ClearAimSlot(int slot)
+    {
+        if (_va == null) return;
+        if (slot < 0 || slot >= AimSlotCount) return;
+        int baseOff = AimSlotsOffset + slot * AimSlotBytes;
+        _va.Write(baseOff + AimSlotEnabledOff, 0u);
+        Thread.MemoryBarrier();
+        _va.Write(baseOff + AimSlotBotOff,   0UL);
+    }
+
+    public (ulong botKey, bool enabled, float pitch, float yaw) ReadAimSlot(int slot)
+    {
+        if (_va == null) return (0UL, false, 0f, 0f);
+        if (slot < 0 || slot >= AimSlotCount) return (0UL, false, 0f, 0f);
+        int baseOff = AimSlotsOffset + slot * AimSlotBytes;
+        ulong key = _va.ReadUInt64(baseOff + AimSlotBotOff);
+        bool  en  = _va.ReadUInt32(baseOff + AimSlotEnabledOff) != 0;
+        float p   = _va.ReadSingle(baseOff + AimSlotPitchOff);
+        float y   = _va.ReadSingle(baseOff + AimSlotYawOff);
+        return (key, en, p, y);
+    }
+
+    private void ZeroAimSlots()
+    {
+        if (_va == null) return;
+        for (int i = 0; i < AimSlotCount * AimSlotBytes; i++) _va.Write(AimSlotsOffset + i, (byte)0);
+        _va.Write(AimSlotCountOffset, (uint)AimSlotCount);
     }
 
     public void Write(int slot, byte val)
