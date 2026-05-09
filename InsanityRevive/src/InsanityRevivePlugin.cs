@@ -42,6 +42,7 @@ public sealed class InsanityRevivePlugin : BasePlugin
         // freshly connected slots that haven't been adopted yet. Cheap when
         // the pin map is empty (early-out).
         RegisterListener<Listeners.OnTick>(AimProbe.OnTick);
+        RegisterListener<Listeners.OnTick>(AimLookflowProbe.OnTick);
         RegisterListener<Listeners.OnMapStart>(map =>
         {
             try { _manager?.OnMapStart(); }
@@ -505,6 +506,30 @@ public sealed class InsanityRevivePlugin : BasePlugin
         if (info.ArgCount >= 3 && int.TryParse(info.GetArg(2), out var b)) budget = Math.Clamp(b, 1, 500);
         AimDiag.SetEnabled(on, budget);
         info.ReplyToCommand($"[aimdiag] enabled={on} budget={AimDiag.LogsRemaining}");
+    }
+
+    [ConsoleCommand("insanity_probe_lookflow",
+        "Capture per-tick m_lookPitch/Yaw + m_angEyeAngles for one bot to discriminate engine-target vs smoother-output")]
+    [RequiresPermissions("@css/cheats")]
+    [CommandHelper(minArgs: 1, usage: "<slot> [ticks=256]  |  stop")]
+    public void OnAimProbeLookflow(CCSPlayerController? caller, CommandInfo info)
+    {
+        var first = info.GetArg(1).Trim().ToLowerInvariant();
+        if (first is "stop" or "off")
+        {
+            AimLookflowProbe.StopEarly();
+            info.ReplyToCommand("[lookflow] stop requested; dump in server.log");
+            return;
+        }
+        if (!int.TryParse(first, out var slot) || slot < 0 || slot > 63)
+        {
+            info.ReplyToCommand("[lookflow] usage: insanity_probe_lookflow <slot> [ticks=256] | stop");
+            return;
+        }
+        int ticks = 256;
+        if (info.ArgCount >= 3 && int.TryParse(info.GetArg(2), out var t)) ticks = Math.Clamp(t, 16, 4096);
+        AimLookflowProbe.Start(slot, ticks);
+        info.ReplyToCommand($"[lookflow] armed slot={slot} ticks={ticks}; engage the bot, dump fires automatically into server.log");
     }
 
     [ConsoleCommand("insanity_aim_hook_set",
