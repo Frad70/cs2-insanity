@@ -1,38 +1,49 @@
 // =============================================================================
 // AimController.cs — per-bot driver for the v7 per-slot aim override pool.
 //
-// Architecture (post-2026-05-09 rework, after sample-write phase pattern
-// proved to add unacceptable 110ms aim lag):
+// Etap D (Layer 1 — own target picker, 2026-05-09):
+// Stops parasitizing engine BT's m_lookPitch/m_lookYaw target. Each tick
+// AimController scans alive enemy controllers, applies a 180° front-cone
+// FOV filter (relative to bot's current eye yaw — discourages 360° spin-
+// to-track-enemy-behind-you), picks closest, computes aim angle from
+// bot eye-pos to target body-center, applies skill-scaled uniform noise,
+// writes to AimSlot pool.
 //
-//   * Pool layout v7 widened AimSlot from 24 → 32 bytes, adding bt_target_*
-//     fields. C++ AimHook handler captures BT's freshly-set m_lookPitch/Yaw
-//     into those fields BEFORE applying our override.
-//   * AimController reads bt_target_* from the pool each tick — clean BT
-//     target with 1-tick lag (15.6ms @ 64 tps), no stale m_lookPitch issue.
-//   * Computes override = bt_target + per-tick noise scaled by
-//     (1 − CurrentAimSkill/100), writes to AimSlot.
-//   * C++ handler clobbers m_lookPitch/m_angEyeAngles with our override —
-//     smoother body of UpdateLookAngles sees override == lookP and lerps
-//     to a fixed point: bot eye locks to (target + noise).
+// Why own target: engine BT's target picking is the floor we couldn't
+// beat by degrading. With own target picking, "good aim" is a real
+// thing we can produce (high-skill bot precisely on target body) and
+// "bad aim" is also a real thing (low-skill bot scattered around the
+// vicinity). Skill differentiation finally has dynamic range.
 //
-// Net effect: bot eye is at BT's intended target offset by noise each tick,
-// reaction lag = 1 tick (essentially imperceptible — humans have 50–250ms
-// reaction lag on aim redirects).
+// LoS check (raycast eye→target body) deferred to L1.5 — engine wrappers
+// for TraceRay aren't trivially exposed in CSSharp; for L1 a bot may
+// "track" enemies through walls. Visually wonky but lets us validate
+// the angle pipeline first.
 //
-// Idle gate: when bt_target hasn't changed (BT not redirecting) for
-// IdleThreshold ticks, disarm so the engine smoother runs natural. Avoids
-// freezing eye at a stale target indefinitely.
+// Trigger discipline: engine BT still owns the fire decision (whether to
+// pull trigger this tick). Our aim override only changes WHERE bullets
+// go. If BT picks target A but we're aimed at B, bullets fly toward B
+// when BT decides to fire. Some shots wasted, some lucky — acceptable
+// for L1; L2+ may add usercmd injection to also drive trigger from C#.
 //
-// History: identity-passthrough (Etap B) read m_lookPitch directly + had
-// only m_angEyeAngles override → smoother dampened our writes. Sample-write
-// phase pattern (Etap B+) added m_lookPitch override + cached target across
-// SamplePeriod=8 ticks → bots played with 110ms reaction lag, kennyS skill=95
-// fragged less than donk skill=51 because lag dominated noise advantage.
-// v7 feedback-channel design: 1-tick lag, full noise effect, full lock.
+// Pool architecture unchanged from v7: AimSlot[64] with bot_key +
+// override + bt_target_*. We still write override; bt_target_* is now
+// pure diagnostic (we no longer read it as our source of truth).
+//
+// History (don't redo):
+//   - Identity passthrough through engine target = pure-degrade ceiling
+//     too low, kennyS Smurf 95 indistinguishable from donk skill 51
+//     in 7-round live test (2026-05-09). Hence Etap D.
+//   - Sample-write phase pattern (8-tick cache) = 110ms aim lag, worse
+//     than per-tick.
+//   - Writing only m_angEyeAngles = smoother undoes it. Need m_lookPitch
+//     write too. C++ side already does this.
 // =============================================================================
 
 using System;
+using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Utils;
 
 namespace InsanityRevive;
 
@@ -44,11 +55,9 @@ public sealed class AimController
     /// stomping on it.</summary>
     public static bool GlobalDisable { get; set; } = false;
 
-    private float _prevBtP;
-    private float _prevBtY;
-    private int   _idleTicks;
     private bool  _armed;
     private int   _lastSlot = -1;  // slot we last wrote to — clear on slot change
+    private uint  _lastTargetSlotPlus1;  // target's slot+1 (so 0 = "no target last tick")
 
     // xorshift32 state for per-bot, per-tick aim noise. Seeded lazily from
     // BotProfile.Seed so two bots with the same skill/profile don't share
@@ -56,17 +65,24 @@ public sealed class AimController
     private uint _rng;
     private bool _rngSeeded;
 
-    /// <summary>How many consecutive ticks of |dBtTarget| ≤ MovementEpsilon
-    /// before we disarm and let the engine smoother run unmolested.
-    /// 32 ticks = 0.5 sec @ 64 tps. Bot needs to be holding a steady aim
-    /// for half a second before we let go — picks up active tracking
-    /// (constantly redirecting) but releases on standing-around-spawn.</summary>
-    private const int IdleThreshold = 32;
+    /// <summary>FOV cone (full angle, degrees) the bot considers "in front
+    /// of me" for target selection. 180° = front hemisphere. Tighter (e.g.
+    /// 110°) would simulate "human can't see enemy 80° to the side" but
+    /// also causes bot to ignore flanks; CS2 BT's natural FOV is wider
+    /// than 110° so 180° is the conservative L1 default.</summary>
+    private const float FovDeg = 180f;
 
-    /// <summary>Threshold below which a per-tick BT-target delta counts as
-    /// "no movement". 0.01° matches the same epsilon AimLookflowProbe uses
-    /// for "idle" classification.</summary>
-    private const float MovementEpsilon = 0.01f;
+    /// <summary>Approximate eye-z offset above pawn AbsOrigin for vector
+    /// math. Real value is ~64 standing, ~46 crouched; for L1 we use a
+    /// constant. Slight inaccuracy on crouched targets, will refine in
+    /// L2+ when we read the actual viewmodel offset field.</summary>
+    private const float EyeHeight = 64f;
+
+    /// <summary>Z offset above pawn AbsOrigin where we aim — body
+    /// center, NOT head. L1 is "aim at body, don't headhunt". Head
+    /// aim is a per-skill modulation in L2+ (high-skill targets head,
+    /// low-skill aims at chest/stomach).</summary>
+    private const float TargetBodyHeight = 48f;
 
     /// <summary>Maximum per-axis additive aim error applied to the engine
     /// target before writing to the override pool. The actual error is scaled
@@ -78,7 +94,7 @@ public sealed class AimController
     private const float MaxAimErrorDeg = 5f;
 
     public bool Armed => _armed;
-    public int  IdleTicks => _idleTicks;
+    public int  LastTargetSlot => (int)_lastTargetSlotPlus1 - 1;
 
     /// <summary>Drive one tick. Pool may be null (early boot before manager
     /// owns its mmap); in that case do nothing — the engine smoother runs.</summary>
@@ -103,51 +119,45 @@ public sealed class AimController
         }
         _lastSlot = slot;
 
-        ulong botKey = (ulong)bot.Handle.ToInt64();
+        // Bot eye position. AbsOrigin is feet; eye is +EyeHeight on Z.
+        if (pawn.AbsOrigin == null) { Disarm(pool); return; }
+        var eyePos = pawn.AbsOrigin;
+        float eyeX = eyePos.X, eyeY = eyePos.Y, eyeZ = eyePos.Z + EyeHeight;
 
-        // Make sure the bot_key is registered in the pool BEFORE the C++
-        // handler tries to write bt_target into our slot. WriteAimSlot
-        // with a placeholder enabled=false override establishes the entry;
-        // we'll then read bt_target back. On the very first tick of a
-        // bot's life, bt_target won't exist yet — handle the NaN case below.
-        if (!_armed)
-        {
-            pool.WriteAimSlot(slot, botKey, enabled: false, pitch: 0f, yaw: 0f);
-        }
+        // Bot's current facing yaw — for FOV gate.
+        float yawRad = pawn.EyeAngles.Y * MathF.PI / 180f;
+        float fwdX = MathF.Cos(yawRad);
+        float fwdY = MathF.Sin(yawRad);
 
-        // Read BT's intended target via the v7 feedback channel — populated
-        // by the C++ handler last tick (or this tick, depending on tick
-        // ordering between UpdateLookAngles and CSSharp.OnTick).
-        var (btP, btY) = pool.ReadBotTarget(slot);
-        if (float.IsNaN(btP) || float.IsNaN(btY))
+        // PICK TARGET: closest alive enemy in front-cone FOV.
+        var target = PickTarget(ctrl, eyeX, eyeY, eyeZ, fwdX, fwdY);
+        if (target == null)
         {
-            // First tick — no BT target captured yet. Skip; next tick
-            // we'll have one.
-            return;
-        }
-        btP = NormalizeAngle(btP);  // m_lookPitch sometimes wraparound
-
-        // Idle gate — track whether BT is actively redirecting aim.
-        float dP = btP - _prevBtP;
-        float dY = AngleDelta(btY, _prevBtY);
-        _prevBtP = btP;
-        _prevBtY = btY;
-        if (MathF.Abs(dP) < MovementEpsilon && MathF.Abs(dY) < MovementEpsilon)
-            _idleTicks++;
-        else
-            _idleTicks = 0;
-        if (_idleTicks >= IdleThreshold)
-        {
+            // No target visible/picked — disarm so engine BT runs natural
+            // (bot can wander, BT may still pick targets we don't see).
             Disarm(pool);
             return;
         }
 
-        // Apply skill-scaled noise. skill=100 → 0° (perfect);
-        // skill=50 → ±MaxAimErrorDeg/2; skill=0 → ±MaxAimErrorDeg.
+        var tPawn = target.PlayerPawn?.Value;
+        if (tPawn?.AbsOrigin == null) { Disarm(pool); return; }
+        float tx = tPawn.AbsOrigin.X;
+        float ty = tPawn.AbsOrigin.Y;
+        float tz = tPawn.AbsOrigin.Z + TargetBodyHeight;
+
+        // Compute aim angle from bot eye to target body center.
+        float dx = tx - eyeX;
+        float dy = ty - eyeY;
+        float dz = tz - eyeZ;
+        float dist2d = MathF.Sqrt(dx * dx + dy * dy);
+        float yawDeg   = MathF.Atan2(dy, dx) * 180f / MathF.PI;
+        // Source 2 convention: pitch positive = looking down. atan2(dz, dist2d)
+        // is positive when looking up (target above), so negate.
+        float pitchDeg = -MathF.Atan2(dz, MathF.Max(0.001f, dist2d)) * 180f / MathF.PI;
+
+        // Apply skill-scaled noise.
         if (!_rngSeeded)
         {
-            // Mix profile seed with slot so two bots from cloned profiles
-            // (rare but possible) don't get the same noise sequence.
             ulong s = (profile?.Seed ?? 0xDEADBEEFCAFEBABEUL) ^ ((ulong)(uint)slot << 32) ^ 0xA1B2C3D4E5F60718UL;
             _rng = (uint)(s ^ (s >> 32));
             if (_rng == 0) _rng = 0xCAFEBABE;
@@ -158,11 +168,66 @@ public sealed class AimController
         float errorDeg = errorFactor * MaxAimErrorDeg;
         float noiseP = NextFloatM1to1() * errorDeg;
         float noiseY = NextFloatM1to1() * errorDeg;
-        float overP = MathF.Max(-89f, MathF.Min(89f, btP + noiseP));
-        float overY = btY + noiseY;
+        float overP = MathF.Max(-89f, MathF.Min(89f, pitchDeg + noiseP));
+        float overY = yawDeg + noiseY;
 
+        ulong botKey = (ulong)bot.Handle.ToInt64();
         pool.WriteAimSlot(slot, botKey, enabled: true, pitch: overP, yaw: overY);
         _armed = true;
+        _lastTargetSlotPlus1 = (uint)(target.Slot + 1);
+    }
+
+    /// <summary>Pick closest alive enemy controller within FOV cone of
+    /// (fwdX, fwdY). Returns null if no enemies in view. L1: distance-only,
+    /// no LoS check (will see through walls). L1.5+ adds raycast.</summary>
+    private CCSPlayerController? PickTarget(
+        CCSPlayerController self,
+        float eyeX, float eyeY, float eyeZ,
+        float fwdX, float fwdY)
+    {
+        // FOV dot threshold: cos(half_fov_rad). For 180° → 0 (any front
+        // hemisphere); 110° → cos(55°) ≈ 0.574.
+        float halfFovRad = (FovDeg * 0.5f) * MathF.PI / 180f;
+        float fovDotThreshold = MathF.Cos(halfFovRad);
+
+        int myTeam = self.TeamNum;
+        CCSPlayerController? best = null;
+        float bestDistSq = float.MaxValue;
+
+        foreach (var enemy in Utilities.GetPlayers())
+        {
+            if (enemy == null || !enemy.IsValid) continue;
+            if (enemy.Slot == self.Slot) continue;
+            if (enemy.TeamNum == myTeam) continue;
+            // Spec / unassigned can't be hit.
+            if (enemy.TeamNum < 2) continue;
+
+            var ePawn = enemy.PlayerPawn?.Value;
+            if (ePawn == null || !ePawn.IsValid) continue;
+            if (ePawn.LifeState != 0) continue;  // 0 = alive
+            if (ePawn.AbsOrigin == null) continue;
+
+            float dx = ePawn.AbsOrigin.X - eyeX;
+            float dy = ePawn.AbsOrigin.Y - eyeY;
+            float dz = (ePawn.AbsOrigin.Z + TargetBodyHeight) - eyeZ;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < 1f) continue;
+
+            // FOV check on the horizontal plane (yaw only). This is
+            // intentional — vertical FOV is rarely the bottleneck for
+            // human aim, and CS maps are mostly horizontal anyway.
+            float dist2d = MathF.Sqrt(dx * dx + dy * dy);
+            if (dist2d < 0.001f) continue;  // directly above/below — skip
+            float dot = (dx * fwdX + dy * fwdY) / dist2d;
+            if (dot < fovDotThreshold) continue;
+
+            if (distSq < bestDistSq)
+            {
+                bestDistSq = distSq;
+                best = enemy;
+            }
+        }
+        return best;
     }
 
     /// <summary>Force-disarm: clear our AimSlot if armed. Idempotent. Called
@@ -173,7 +238,7 @@ public sealed class AimController
         if (!_armed) return;
         if (pool != null && pool.IsOpen && _lastSlot >= 0) pool.ClearAimSlot(_lastSlot);
         _armed = false;
-        _idleTicks = 0;
+        _lastTargetSlotPlus1 = 0;
     }
 
     private static float AngleDelta(float a, float b)
