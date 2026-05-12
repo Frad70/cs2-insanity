@@ -71,7 +71,10 @@ public sealed class PersonaRegistry
             _byId.Clear();
             int dropped = 0;
             foreach (var p in arr) {
-                if (p.Id <= 0 || string.IsNullOrEmpty(p.Name)) continue;
+                // Whitespace-only names normalise to "" and collide with every
+                // other empty-key persona, so reject them at load too — not
+                // just empty/null. Catches hand-edited personas.json garbage.
+                if (p.Id <= 0 || string.IsNullOrWhiteSpace(p.Name)) continue;
                 // v0.5.2-beta migration: drop "playerN" sentinel garbage
                 // from v0.5.1-beta's empty-FIFO fallback. Real personas
                 // (LastSeenAt populated, name from roster, etc.) survive.
@@ -168,10 +171,14 @@ public sealed class PersonaRegistry
             return dormant;
         }
 
-        // (2) Mint from fallback roster.
+        // (2) Mint from fallback roster. Filter out whitespace/empty entries
+        // up-front so a typo in NamePool can never produce a Persona whose
+        // Norm() key is "" (collides with every other empty-key entry and
+        // renders blank on the scoreboard).
         var existingNorm = new HashSet<string>(
             _byId.Values.Select(p => Norm(p.Name)), StringComparer.Ordinal);
         var newName = fallbackRoster
+            .Where(n => !string.IsNullOrWhiteSpace(n))
             .FirstOrDefault(n => !reservedNames.Contains(Norm(n))
                               && !existingNorm.Contains(Norm(n)));
 
@@ -180,7 +187,7 @@ public sealed class PersonaRegistry
         // CFC PRE empty-FIFO supercede prevents engine_quota cascades that
         // exhaust the roster. If we hit it, log loudly: it means batch
         // size > roster size (32 entries), which is a config/usage issue.
-        if (newName == null) {
+        if (string.IsNullOrWhiteSpace(newName)) {
             Log.Warn($"AcquireForSpawn: roster exhausted (reserved={reservedNames.Count}, " +
                      $"existing={existingNorm.Count}). Synthesizing player{_nextId} sentinel — " +
                      $"will be GC'd on next Load() per migration regex.");
