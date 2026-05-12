@@ -27,12 +27,23 @@ env:
   HL2SDK_BRANCH: "cs2"
   MMSOURCE_REPO: "https://github.com/alliedmodders/metamod-source.git"
   MMSOURCE_BRANCH: "master"
+  # See .github/workflows/build.yml for the rationale. Kept in sync
+  # because both workflows clone the same upstream sources.
+  MMSOURCE_PIN: "51e2532b252b9b37dd1eb0ee28b277464a5dbb4a"
 
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Code scanning must be enabled in repo settings before the
+    # CodeQL action can publish SARIF results. Until that toggle is
+    # flipped, the upload step fails with "Code scanning is not
+    # enabled for this repository". Mark the whole job as non-blocking
+    # so the rest of the build matrix isn't held up by a config-only
+    # issue. Drop this flag (and resolve issue #34) once code scanning
+    # is enabled in the repository's Security settings.
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +99,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: InsanityHider/hl2sdk
-          key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+          key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml', 'InsanityHider/patches/*.patch') }}
 
       - name: Cache metamod-source clone
         if: matrix.language == 'cpp'
@@ -96,19 +107,25 @@ jobs:
         uses: actions/cache@v4
         with:
           path: InsanityHider/mmsource
-          key: mmsource-${{ env.MMSOURCE_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+          key: mmsource-${{ env.MMSOURCE_PIN }}-${{ hashFiles('.github/workflows/build.yml') }}
 
-      - name: Vendor hl2sdk
+      - name: Vendor hl2sdk + apply patches
         if: matrix.language == 'cpp' && steps.cache-hl2sdk.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "$HL2SDK_BRANCH" \
             "$HL2SDK_REPO" InsanityHider/hl2sdk
+          for p in InsanityHider/patches/hl2sdk-*.patch; do
+            [ -f "$p" ] || continue
+            echo "Applying $p to InsanityHider/hl2sdk"
+            (cd InsanityHider/hl2sdk && git apply --verbose "../../$p")
+          done
 
-      - name: Vendor metamod-source
+      - name: Vendor metamod-source (pinned)
         if: matrix.language == 'cpp' && steps.cache-mmsource.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "$MMSOURCE_BRANCH" \
+          git clone --branch "$MMSOURCE_BRANCH" \
             "$MMSOURCE_REPO" InsanityHider/mmsource
+          git -C InsanityHider/mmsource checkout --detach "$MMSOURCE_PIN"
 
       - name: Build C++ for CodeQL
         if: matrix.language == 'cpp'
