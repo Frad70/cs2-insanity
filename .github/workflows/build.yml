@@ -39,6 +39,13 @@ env:
   HL2SDK_BRANCH: "cs2"
   MMSOURCE_REPO: "https://github.com/alliedmodders/metamod-source.git"
   MMSOURCE_BRANCH: "master"
+  # Pinned to the commit just before mmsource@master switched SH_CALL_HOOKS
+  # from `my_rettype orig_ret;` to value-init `orig_ret{};` (c3f1c4f,
+  # "Upgrade Clang to v22"). Either form needs a default-constructible
+  # rettype, so we also patch hl2sdk's CPlayerSlot (see
+  # InsanityHider/patches/) — but pinning here keeps the cache key stable
+  # and makes future drift visible. See issue #33.
+  MMSOURCE_PIN: "51e2532b252b9b37dd1eb0ee28b277464a5dbb4a"
 
 jobs:
   build-cssharp:
@@ -141,26 +148,39 @@ jobs:
         uses: actions/cache@v4
         with:
           path: InsanityHider/hl2sdk
-          key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+          # Cache key includes the patch contents so changing the patch
+          # invalidates the cache (otherwise an old unpatched clone would
+          # be reused and the build would mysteriously break again).
+          key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml', 'InsanityHider/patches/*.patch') }}
 
       - name: Cache metamod-source clone
         id: cache-mmsource
         uses: actions/cache@v4
         with:
           path: InsanityHider/mmsource
-          key: mmsource-${{ env.MMSOURCE_BRANCH }}-${{ hashFiles('.github/workflows/build.yml') }}
+          key: mmsource-${{ env.MMSOURCE_PIN }}-${{ hashFiles('.github/workflows/build.yml') }}
 
-      - name: Vendor hl2sdk (${{ env.HL2SDK_BRANCH }} branch)
+      - name: Vendor hl2sdk (${{ env.HL2SDK_BRANCH }} branch) + apply patches
         if: steps.cache-hl2sdk.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "$HL2SDK_BRANCH" \
             "$HL2SDK_REPO" InsanityHider/hl2sdk
+          # Apply the bundled patches in-place. `git apply` runs from the
+          # repo root, so paths inside the .patch files are relative to
+          # the hl2sdk checkout.
+          for p in InsanityHider/patches/hl2sdk-*.patch; do
+            [ -f "$p" ] || continue
+            echo "Applying $p to InsanityHider/hl2sdk"
+            (cd InsanityHider/hl2sdk && git apply --verbose "../../$p")
+          done
 
-      - name: Vendor metamod-source (${{ env.MMSOURCE_BRANCH }} branch)
+      - name: Vendor metamod-source (pinned ${{ env.MMSOURCE_PIN }})
         if: steps.cache-mmsource.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "$MMSOURCE_BRANCH" \
+          # Full clone (no --depth) so the SHA pin can be checked out.
+          git clone --branch "$MMSOURCE_BRANCH" \
             "$MMSOURCE_REPO" InsanityHider/mmsource
+          git -C InsanityHider/mmsource checkout --detach "$MMSOURCE_PIN"
 
       - name: Ensure protoc is executable
         run: chmod +x InsanityHider/hl2sdk/devtools/bin/linux/protoc || true

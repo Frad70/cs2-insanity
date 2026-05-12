@@ -1,0 +1,10 @@
+--- a/public/playerslot.h
++++ b/public/playerslot.h
+@@ -10,6 +10,7 @@
+ class CPlayerSlot
+ {
+ public:
++	CPlayerSlot() : m_Data( -1 ) {}
+ 	CPlayerSlot( int slot ) : m_Data( slot ) {}
+
+ 	void Invalidate() { m_Data = -1; }
