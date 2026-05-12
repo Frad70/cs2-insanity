@@ -62,39 +62,44 @@ namespace InsanityRevive;
 
 public static class SchemaSafety
 {
-    // Each entry is "ClassName.FieldName". The deny check uses both the
-    // exact class given by the caller AND the entity's parent class
-    // hierarchy in spirit — but Schema lookups are class-name-string-based
-    // anyway, so callers must pass the class they intended to write.
-    // We list the field under EVERY class name the engine accepts for it,
-    // so a caller passing "CCSPlayerPawnBase" and another passing
-    // "CCSPlayerPawn" both get caught.
-    private static readonly HashSet<string> _deny = new(StringComparer.Ordinal)
+    // Each entry is "ClassName.FieldName" — used for fields that must be
+    // refused under one specific class string but are still safe under
+    // others (none today, but kept for future incidents that prove
+    // class-specific).
+    private static readonly HashSet<string> _denyClassField = new(StringComparer.Ordinal)
     {
-        // m_iTeamNum — crashes via SetStateChanged. Use SwitchTeam instead.
-        "CCSPlayerController.m_iTeamNum",
-        "CCSPlayerPawnBase.m_iTeamNum",
-        "CCSPlayerPawn.m_iTeamNum",
-        "CBaseEntity.m_iTeamNum",
+    };
 
-        // m_angEyeAngles — crashes. Use v_angle (untested) or skip.
-        "CCSPlayerPawnBase.m_angEyeAngles",
-        "CCSPlayerPawn.m_angEyeAngles",
-
-        // m_bHasHelmet — crashes (v0.6.0.9). Use GiveNamedItem("item_assaultsuit").
-        "CCSPlayerPawn.m_bHasHelmet",
-        "CCSPlayerPawnBase.m_bHasHelmet",
-
-        // m_ArmorValue — defensively removed (v0.6.0.11). Use item give.
-        "CCSPlayerPawn.m_ArmorValue",
-        "CCSPlayerPawnBase.m_ArmorValue",
+    // Field-name-only deny set. The engine's "is not networked" → server
+    // crash failure mode is keyed on the underlying field, not the class
+    // string the caller hands to Schema. So enumerate the field once here
+    // and the deny check fires regardless of which parent-class alias
+    // (CBaseEntity, CBasePlayerPawn, CCSPlayerPawnBase, CCSPlayerPawn,
+    // CCSPlayerController, …) the caller routes through. This closes the
+    // gap from issue #23 where the original "ClassName.FieldName" set had
+    // partial parent-class coverage and a future call site routing through
+    // an unlisted alias could re-trigger the v0.6.0.6 / .9 / .11 crash class.
+    //
+    // Trade-off: a legitimate same-named field on an unrelated schema class
+    // gets falsely refused. The crashing-field pool here is tiny and these
+    // names (m_iTeamNum, m_angEyeAngles, m_bHasHelmet, m_ArmorValue) don't
+    // overlap with any field we currently want to write under any class.
+    private static readonly HashSet<string> _denyField = new(StringComparer.Ordinal)
+    {
+        "m_iTeamNum",      // crashes via SetStateChanged. Use SwitchTeam instead.
+        "m_angEyeAngles",  // crashes. Use v_angle (untested) or skip.
+        "m_bHasHelmet",    // crashes (v0.6.0.9). Use GiveNamedItem("item_assaultsuit").
+        "m_ArmorValue",    // defensively removed (v0.6.0.11). Use item give.
     };
 
     /// <summary>
     /// True if writing this field crashes the server (per incident log).
+    /// Catches every parent-class alias the engine accepts for the field,
+    /// since the underlying crash is field-keyed, not class-keyed.
     /// </summary>
     public static bool IsDenied(string schemaClass, string fieldName)
-        => _deny.Contains($"{schemaClass}.{fieldName}");
+        => _denyField.Contains(fieldName)
+        || _denyClassField.Contains($"{schemaClass}.{fieldName}");
 
     /// <summary>
     /// Schema.SetSchemaValue&lt;T&gt; with deny-list gate. Returns true on

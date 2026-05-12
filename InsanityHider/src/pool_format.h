@@ -25,6 +25,18 @@
 // to know BT's intended target without stale-read pollution. Solves
 // the sample/write phase lag — C# can react every tick to fresh BT
 // data instead of caching a target across N ticks.
+//
+// !!! DIAGNOSTIC-ONLY SINCE ETAP D (commit 172f86e) !!!
+// AimController switched to its own target picker in Etap D, so the
+// bt_target_pitch / bt_target_yaw fields below are no longer read on
+// the C# side. The C++ writer remains so the values are still
+// observable in a debugger / pool dump for hybrid-mode revival, but
+// DO NOT wire a new C# consumer onto these fields without auditing
+// for the feedback-loop regression that Etap C+ specifically fixed.
+// Fields kept (rather than removed) to avoid a v7 → v8 pool bump
+// while a hybrid mode is still plausible. Revisit at the next
+// independent pool-version bump.
+//
 //   [+0..+7]   uint64 bot_key          CCSBot* pointer (the AI struct,
 //                                       == `this` inside CCSBot::Update-
 //                                       LookAngles). NOT the CCSPlayer-
@@ -38,8 +50,12 @@
 //   [+8..+11]  uint32 enabled          0: no override, 1: use override
 //   [+12..+15] float  pitch            override pitch (C# writes)
 //   [+16..+19] float  yaw              override yaw (C# writes)
-//   [+20..+23] float  bt_target_pitch  fresh BT m_lookPitch (C++ writes)
-//   [+24..+27] float  bt_target_yaw    fresh BT m_lookYaw   (C++ writes)
+//   [+20..+23] float  bt_target_pitch  v7-only, written by C++ but NOT
+//                                       currently consumed (diagnostic
+//                                       since Etap D — see notice above).
+//   [+24..+27] float  bt_target_yaw    v7-only, written by C++ but NOT
+//                                       currently consumed (diagnostic
+//                                       since Etap D — see notice above).
 //   [+28..+31] uint32 reserved         0 / alignment
 //
 // AIM OVERRIDE block (v5, 2026-05-08; per-slot extension v6, 2026-05-09):
@@ -112,8 +128,10 @@ constexpr size_t POOL_AIM_SLOT_BOT_OFFSET        = 0;   // uint64
 constexpr size_t POOL_AIM_SLOT_ENABLED_OFFSET    = 8;   // uint32
 constexpr size_t POOL_AIM_SLOT_PITCH_OFFSET      = 12;  // float — C# writes
 constexpr size_t POOL_AIM_SLOT_YAW_OFFSET        = 16;  // float — C# writes
-constexpr size_t POOL_AIM_SLOT_BT_PITCH_OFFSET   = 20;  // float — C++ writes BT's m_lookPitch
-constexpr size_t POOL_AIM_SLOT_BT_YAW_OFFSET     = 24;  // float — C++ writes BT's m_lookYaw
+// Diagnostic-only since Etap D (172f86e) — written by C++, NOT read by C#.
+// See notice in the AimSlot layout doc above.
+constexpr size_t POOL_AIM_SLOT_BT_PITCH_OFFSET   = 20;  // float — diagnostic
+constexpr size_t POOL_AIM_SLOT_BT_YAW_OFFSET     = 24;  // float — diagnostic
 // 28..31 = reserved/alignment
 
 constexpr size_t POOL_TOTAL = POOL_AIM_SLOTS_OFFSET + (POOL_AIM_SLOT_COUNT * POOL_AIM_SLOT_BYTES);  // 6052

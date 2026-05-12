@@ -102,6 +102,12 @@ public sealed class InsanityRevivePlugin : BasePlugin
             try {
                 if (_manager == null) return HookResult.Continue;
                 int winnerTeam = @event.Winner;  // 2=T, 3=CT, 0=draw
+                // Draws (knife-out timeout, surrender, mid-round mp_restartgame,
+                // etc.) report winnerTeam == 0. Without this guard `win = (0 ==
+                // botTeam)` is false for every managed bot — so every bot would
+                // be told its team lost, falsely incrementing LossStreak and
+                // tipping the wakeup-from-complacency check at Complacency >= 50.
+                if (winnerTeam != 2 && winnerTeam != 3) return HookResult.Continue;
 
                 double ctSum = 0, tSum = 0;
                 int ctCount = 0, tCount = 0;
@@ -187,27 +193,31 @@ public sealed class InsanityRevivePlugin : BasePlugin
 
     /// <summary>
     /// Coarse "observed" skill estimate for a real human (0..100 scale).
-    /// Used by the complacency mechanic — bots shouldn't peek the
-    /// real player's hidden SkillRating, they only see what's
-    /// observable in-match. v1: derive from in-match K/D once at least
-    /// 3 deaths have happened; otherwise return 50 baseline.
+    /// Used by the complacency mechanic — bots shouldn't peek the real
+    /// player's hidden SkillRating, they only see what's observable in
+    /// the live match.
     ///
-    /// MatchStats fields (from `c.ActionTrackingServices.MatchStats` or
-    /// similar) may not always be populated; if they aren't, fall
-    /// through to the baseline. Don't crash on access.
+    /// v1 implementation: linear map of <c>CCSPlayerController.Score</c>
+    /// (cumulative match score: kills + objective bonuses such as plant,
+    /// defuse, hostage, MVP) into the range 50..80. Anything &lt;= 0
+    /// returns the 50 baseline. This is loose — Score is biased toward
+    /// objective-heavy roles — but it preserves the spec rule of using
+    /// observable signal only and is robust enough for complacency drift.
+    ///
+    /// Future revision: derive from in-match K/D via
+    /// <c>c.ActionTrackingServices.MatchStats</c> once that surface is
+    /// wired up (tracked together with the OwnPerformance hook in the
+    /// EventRoundEnd dispatch above).
     /// </summary>
     private static double EstimateHumanSkill(CCSPlayerController c)
     {
         try
         {
-            // Try score / K-D-style heuristic via Score property on the
-            // controller. CSSharp exposes c.Score (sum of points) — high
-            // scores correlate roughly with skill but are too noisy
-            // mid-round. Fallback to baseline 50 for v1.
             int score = c.Score;
             if (score <= 0) return 50.0;
-            // Linear map 0–60 score → 50–80 skill. Cap to keep estimate
-            // away from extremes; complacency math is robust to noise.
+            // Linear map: 1 score-point → 0.5 skill, capped at +30. So a
+            // 60-point score maxes at skill 80. Keeps the estimate away
+            // from extremes; the complacency math is robust to noise.
             double s = 50.0 + Math.Min(30.0, score * 0.5);
             return s;
         }
