@@ -165,6 +165,9 @@ jobs:
       - name: Ensure protoc is executable
         run: chmod +x InsanityHider/hl2sdk/devtools/bin/linux/protoc || true
 
+      - name: Apply SDK compat patches
+        run: scripts/ci-patch-sdks.sh InsanityHider/hl2sdk
+
       - name: make
         working-directory: InsanityHider
         run: |

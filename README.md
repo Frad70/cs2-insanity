@@ -114,7 +114,13 @@ cd InsanityRevive && dotnet build -c Release \
     -p:CSSharpApiPath=/path/to/CounterStrikeSharp.API.dll
 
 # C++ / Metamod plugin.
-cd InsanityHider && make
+# Vendor the SDKs once, apply a small compat patch (see scripts/ci-patch-sdks.sh
+# header for the rationale), then build:
+cd InsanityHider
+git clone --depth 1 --branch cs2    https://github.com/alliedmodders/hl2sdk.git           hl2sdk
+git clone --depth 1 --branch master https://github.com/alliedmodders/metamod-source.git   mmsource
+../scripts/ci-patch-sdks.sh hl2sdk
+make
 ```
 
 ### Deploy

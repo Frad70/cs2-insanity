@@ -110,6 +110,10 @@ jobs:
           git clone --depth 1 --branch "$MMSOURCE_BRANCH" \
             "$MMSOURCE_REPO" InsanityHider/mmsource
 
+      - name: Apply SDK compat patches
+        if: matrix.language == 'cpp'
+        run: scripts/ci-patch-sdks.sh InsanityHider/hl2sdk
+
       - name: Build C++ for CodeQL
         if: matrix.language == 'cpp'
         working-directory: InsanityHider
