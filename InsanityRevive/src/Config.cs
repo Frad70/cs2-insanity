@@ -18,9 +18,6 @@ public sealed class Config
         Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp", "logs");
     private static readonly string CfgPath =
         Path.Combine(Server.GameDirectory, "csgo", "cfg", "insanity.cfg");
-    private static readonly string DefaultRealSteamIds =
-        Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp",
-            "configs", "plugins", "InsanityRevive", "real_steamids.txt");
 
     public Config()
     {
@@ -44,8 +41,6 @@ public sealed class Config
         }
     }
 
-    public string SteamIdMode      => Get("insanity_steamid_mode", "synthetic");
-    public string RealSteamIdsFile => Get("insanity_real_steamids_file", DefaultRealSteamIds);
     public int    DefaultBotCount  => GetInt("insanity_default_bot_count", 5);
     public string LogLevel         => Get("insanity_log_level", "info");
     public bool   ApplyBotNavPatch => GetInt("insanity_apply_botnav_patch", 0) != 0;

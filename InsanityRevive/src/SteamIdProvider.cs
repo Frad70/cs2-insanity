@@ -1,7 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-
 namespace InsanityRevive;
 
 public interface ISteamIdProvider
@@ -46,67 +42,8 @@ public sealed class SyntheticSteamIdProvider : ISteamIdProvider
     }
 }
 
-// Round-robin issuer. File is one ID per line; lines starting with '#'
-// (or blank) skipped. Fatal if the file is missing or empty AND mode is
-// "real" — silent fallback is explicitly forbidden.
-public sealed class RealPoolSteamIdProvider : ISteamIdProvider
-{
-    public string Mode => "real";
-
-    private readonly List<ulong> _pool = new();
-    private readonly HashSet<ulong> _issued = new();
-    private int _cursor;
-
-    public RealPoolSteamIdProvider(string filePath)
-    {
-        if (!File.Exists(filePath))
-            throw new InvalidOperationException(
-                $"insanity_steamid_mode=real but file not found: {filePath}");
-
-        foreach (var raw in File.ReadAllLines(filePath))
-        {
-            var line = raw.Trim();
-            if (line.Length == 0) continue;
-            if (line.StartsWith("#")) continue;
-            if (!ulong.TryParse(line, out var id)) continue;
-            if (id < 76561197960265728UL) continue; // not a SteamID64
-            _pool.Add(id);
-        }
-
-        if (_pool.Count == 0)
-            throw new InvalidOperationException(
-                $"insanity_steamid_mode=real but pool is empty: {filePath}");
-    }
-
-    public ulong Generate(int botSlot)
-    {
-        for (var i = 0; i < _pool.Count; i++)
-        {
-            var idx = (_cursor + i) % _pool.Count;
-            var id  = _pool[idx];
-            if (_issued.Contains(id)) continue;
-            _issued.Add(id);
-            _cursor = (idx + 1) % _pool.Count;
-            return id;
-        }
-        // Pool exhausted — recycle from the start. Better than failing.
-        var fallback = _pool[_cursor % _pool.Count];
-        _cursor = (_cursor + 1) % _pool.Count;
-        return fallback;
-    }
-
-    public int PoolSize => _pool.Count;
-}
-
 public static class SteamIdProviderFactory
 {
     public static ISteamIdProvider Create(Config cfg, string sessionId)
-    {
-        var mode = (cfg.SteamIdMode ?? "synthetic").Trim().ToLowerInvariant();
-        return mode switch
-        {
-            "real" => new RealPoolSteamIdProvider(cfg.RealSteamIdsFile),
-            _      => new SyntheticSteamIdProvider(sessionId),
-        };
-    }
+        => new SyntheticSteamIdProvider(sessionId);
 }

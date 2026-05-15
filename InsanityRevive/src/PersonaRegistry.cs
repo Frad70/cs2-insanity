@@ -23,7 +23,14 @@ namespace InsanityRevive;
 // of deleted personas to new ones).
 public sealed class PersonaRegistry
 {
-    public const string DefaultPath = "/home/frad70/cs2-server/insanity/personas.json";
+    // Resolved at runtime against the CSSharp gameinfo root so the registry
+    // file lives next to other plugin data. Override path explicitly via the
+    // ctor parameter for tests or alternate locations.
+    public static string DefaultPath =>
+        System.IO.Path.Combine(
+            CounterStrikeSharp.API.Server.GameDirectory,
+            "csgo", "addons", "counterstrikesharp", "configs",
+            "plugins", "InsanityRevive", "personas.json");
 
     private readonly string _path;
     private readonly Dictionary<int, Persona> _byId = new();

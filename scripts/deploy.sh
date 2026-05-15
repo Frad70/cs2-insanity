@@ -7,39 +7,46 @@
 #   1. Verifies working tree is committed (no dirty diff).
 #   2. Builds InsanityRevive in Release config.
 #   3. Computes sha256 of the built DLL + reads current commit-sha.
-#   4. Prints a chat.md-ready stanza for paste into claude/chat.md.
-#   5. Optionally deploys the DLL+PDB to the live server's plugin dir.
+#   4. Prints a deploy-baseline stanza (commit + dll sha) for paste/record.
+#   5. Optionally deploys the DLL+PDB to a dedicated-server plugin dir.
 #
 # WHY it exists:
-#   Twice in this project we hit "DLL drift" — the deployed binary on the
+#   Twice during development we hit "DLL drift" — the deployed binary on the
 #   server didn't match any tagged commit. Root cause was build-and-deploy
 #   without a recorded baseline. This script makes the baseline mandatory:
-#   every deploy prints (and optionally appends) the sha256 + commit-sha so
-#   future drift can be diagnosed.
+#   every deploy prints the sha256 + commit-sha so future drift can be
+#   diagnosed.
 #
 # USAGE:
 #   ./scripts/deploy.sh                   build + print + interactive deploy
 #   ./scripts/deploy.sh --build-only      build + print, no deploy
 #   ./scripts/deploy.sh --auto            build + deploy without prompt
-#   ./scripts/deploy.sh --append-chat     also append to claude/chat.md
 #
-# Set DEPLOY_DIR to override the deploy target (default = live CS2 server).
+# ENV:
+#   SRCDS_ROOT   path to the CS2 dedicated-server root (the one containing
+#                game/csgo/addons/...). Used to derive DEPLOY_DIR if you
+#                don't override it.
+#   DEPLOY_DIR   full path to the InsanityRevive plugin directory on the
+#                target server. Defaults to
+#                "$SRCDS_ROOT/game/csgo/addons/counterstrikesharp/plugins/InsanityRevive".
 # =============================================================================
 
 set -eu -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJ_DIR="$REPO_ROOT/InsanityRevive"
-DEPLOY_DIR="${DEPLOY_DIR:-/mnt/storage/cs2-server/game/csgo/addons/counterstrikesharp/plugins/InsanityRevive}"
+
+if [ -z "${DEPLOY_DIR:-}" ]; then
+    : "${SRCDS_ROOT:?set SRCDS_ROOT to your dedicated-server root, or set DEPLOY_DIR directly}"
+    DEPLOY_DIR="$SRCDS_ROOT/game/csgo/addons/counterstrikesharp/plugins/InsanityRevive"
+fi
 
 mode="interactive"
-append_chat=false
 for arg in "$@"; do
     case "$arg" in
         --build-only)  mode="build-only" ;;
         --auto)        mode="auto" ;;
-        --append-chat) append_chat=true ;;
-        -h|--help)     sed -n '4,30p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '4,34p' "$0"; exit 0 ;;
         *) echo "unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
@@ -73,35 +80,17 @@ dll_sha=$(sha256sum "$dll_path" | awk '{print $1}')
 # 4. Print stanza.
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo
-echo "============== chat.md baseline stanza =============="
+echo "================ deploy baseline ===================="
 cat <<EOF
-**Deploy baseline @ $ts**
-- branch: $branch
-- commit: $commit_sha ($commit_short)
+- timestamp:   $ts
+- branch:      $branch
+- commit:      $commit_sha ($commit_short)
 - nearest tag: $nearest_tag
-- dll sha256: \`$dll_sha\`
-- dll path: $dll_path
+- dll sha256:  $dll_sha
+- dll path:    $dll_path
 EOF
 echo "======================================================"
 echo
-
-if $append_chat; then
-    chat_md="$REPO_ROOT/claude/chat.md"
-    {
-        echo
-        echo "---"
-        echo
-        echo "## $ts — deploy.sh auto-stamp"
-        echo
-        echo "**Deploy baseline**"
-        echo "- branch: $branch"
-        echo "- commit: $commit_sha ($commit_short)"
-        echo "- nearest tag: $nearest_tag"
-        echo "- dll sha256: \`$dll_sha\`"
-        echo
-    } >> "$chat_md"
-    echo "==> Appended to $chat_md"
-fi
 
 # 5. Deploy (or not).
 deploy_now=false

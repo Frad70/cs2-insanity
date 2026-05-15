@@ -33,4 +33,4 @@ jobs:
           sudo install -m 0755 /tmp/bin/ec-linux-amd64 /usr/local/bin/ec
 
       - name: Run editorconfig-checker
-        run: ec -exclude '^\.git/|^claude/chat\.md$'
+        run: ec -exclude '^\.git/'
