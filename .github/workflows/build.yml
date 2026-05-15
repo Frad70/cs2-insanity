@@ -61,7 +61,7 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
@@ -145,7 +145,7 @@ jobs:
 
       - name: Cache hl2sdk clone
         id: cache-hl2sdk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: InsanityHider/hl2sdk
           # Cache key includes the patch contents so changing the patch
@@ -155,7 +155,7 @@ jobs:
 
       - name: Cache metamod-source clone
         id: cache-mmsource
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: InsanityHider/mmsource
           key: mmsource-${{ env.MMSOURCE_PIN }}-${{ hashFiles('.github/workflows/build.yml') }}

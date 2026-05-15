@@ -96,7 +96,7 @@ jobs:
       - name: Cache hl2sdk clone
         if: matrix.language == 'cpp'
         id: cache-hl2sdk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: InsanityHider/hl2sdk
           key: hl2sdk-${{ env.HL2SDK_BRANCH }}-${{ hashFiles('.github/workflows/build.yml', 'InsanityHider/patches/*.patch') }}
@@ -104,7 +104,7 @@ jobs:
       - name: Cache metamod-source clone
         if: matrix.language == 'cpp'
         id: cache-mmsource
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: InsanityHider/mmsource
           key: mmsource-${{ env.MMSOURCE_PIN }}-${{ hashFiles('.github/workflows/build.yml') }}
