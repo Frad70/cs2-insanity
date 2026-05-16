@@ -2,9 +2,9 @@
 
 > _«Когда-нибудь ты не отличишь их от настоящих игроков. И вот тогда станет по-настоящему страшно.»_
 
-Two-plugin stack that turns CS2 dedicated bots into clients indistinguishable from real
+Three-plugin stack that turns CS2 dedicated bots into clients indistinguishable from real
 players on the scoreboard — synthetic SteamIDs, persona names from a curated pool, jittered
-ping, no `BOT` icon.
+ping, no `BOT` icon, and now custom paintkits + knives + gloves to match.
 
 ## Layout
 
@@ -12,6 +12,13 @@ ping, no `BOT` icon.
 | ----------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `InsanityRevive/` | CSSharp (CounterStrikeSharp / .NET) | Owns lifecycle: spawns bots via `bot_add`, overwrites identity (name, SteamID, profile, ping), JSONL telemetry, ProcessUsercmds detour, mapchange survival. Source of truth for the shared pool. |
 | `InsanityHider/`  | Metamod:Source (C++)                | Sits early in the engine callback chain. On `OnClientConnected` post-hook, flips `m_bFakePlayer = 0` for slots marked in the shared pool — *before* the engine's userinfo broadcast leaves the server. That's what kills the `BOT` icon and renders ping in the scoreboard column instead. |
+| `InsanityPaints/` | CSSharp (CounterStrikeSharp / .NET) | Applies weapon paints / knife swaps / glove models. Real-player loadouts persist per-SteamID; Revive-bot loadouts are derived deterministically from the persona name (SHA-256 over UTF-8). Read-only consumer of the shared pool — never writes. |
+
+### Required CS2 setting
+
+`InsanityPaints` needs `core.json` to have `FollowCS2ServerGuidelines: false` — without it,
+CSSharp refuses the `m_iItemDefinitionIndex` / `m_nFallbackPaintKit` writes that move skins
+onto weapons, and the plugin loads but does nothing visible.
 
 The two halves communicate via a 132-byte mmap'd file at `/tmp/insanityrevive_fake_slots.bin`:
 
@@ -42,6 +49,7 @@ verified end-to-end. That's what the `v0.4.0-hidden` tag marks.
 ```bash
 # CSSharp side
 cd InsanityRevive && dotnet build -c Release
+cd InsanityPaints && dotnet build -c Release
 
 # C++ side (needs hl2sdk-cs2 + metamod-source vendored beside the source tree)
 cd InsanityHider && make

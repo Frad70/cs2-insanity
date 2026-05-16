@@ -1,0 +1,22 @@
+[
+  { "defindex": 500, "weapon_name": "weapon_bayonet",              "name": "Bayonet" },
+  { "defindex": 503, "weapon_name": "weapon_knife_css",            "name": "Classic Knife" },
+  { "defindex": 505, "weapon_name": "weapon_knife_flip",           "name": "Flip Knife" },
+  { "defindex": 506, "weapon_name": "weapon_knife_gut",            "name": "Gut Knife" },
+  { "defindex": 507, "weapon_name": "weapon_knife_karambit",       "name": "Karambit" },
+  { "defindex": 508, "weapon_name": "weapon_knife_m9_bayonet",     "name": "M9 Bayonet" },
+  { "defindex": 509, "weapon_name": "weapon_knife_tactical",       "name": "Huntsman Knife" },
+  { "defindex": 512, "weapon_name": "weapon_knife_falchion",       "name": "Falchion Knife" },
+  { "defindex": 514, "weapon_name": "weapon_knife_survival_bowie", "name": "Bowie Knife" },
+  { "defindex": 515, "weapon_name": "weapon_knife_butterfly",      "name": "Butterfly Knife" },
+  { "defindex": 516, "weapon_name": "weapon_knife_push",           "name": "Shadow Daggers" },
+  { "defindex": 517, "weapon_name": "weapon_knife_cord",           "name": "Paracord Knife" },
+  { "defindex": 518, "weapon_name": "weapon_knife_canis",          "name": "Survival Knife" },
+  { "defindex": 519, "weapon_name": "weapon_knife_ursus",          "name": "Ursus Knife" },
+  { "defindex": 520, "weapon_name": "weapon_knife_gypsy_jackknife","name": "Navaja Knife" },
+  { "defindex": 521, "weapon_name": "weapon_knife_outdoor",        "name": "Nomad Knife" },
+  { "defindex": 522, "weapon_name": "weapon_knife_stiletto",       "name": "Stiletto Knife" },
+  { "defindex": 523, "weapon_name": "weapon_knife_widowmaker",     "name": "Talon Knife" },
+  { "defindex": 525, "weapon_name": "weapon_knife_skeleton",       "name": "Skeleton Knife" },
+  { "defindex": 526, "weapon_name": "weapon_knife_kukri",          "name": "Kukri Knife" }
+]
