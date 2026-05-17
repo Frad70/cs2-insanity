@@ -312,10 +312,17 @@ the latest set, preserving image URLs and the `legacy_model` flag.
   Discriminator history:
   - FleetSize=8, stagger NO → crash within minutes
   - FleetSize=4, stagger NO → stable (race window narrower)
-  - FleetSize=8, stagger YES → stable (53min+ verified)
+  - FleetSize=8, stagger YES → stable (verified 98min normal play)
   Cost: skin pop-in is visibly deferred by ~15.6ms per slot index
   (max ~187ms for slot 12), within the spawn-flicker window so
   imperceptible.
+  Edge that still crashes: manual `mp_warmup_start` +
+  `mp_warmup_pausetimer` + `mp_restartgame 1` cascade. This is an
+  engine-side full-game-reset path that respawns everyone outside
+  the normal EventPlayerSpawn flow, so the stagger doesn't catch
+  it. Workaround: don't issue that command combo by hand;
+  competitive-gamemode auto-warmup transitions don't trigger it
+  (verified empirically across 98min of normal play).
 - **Hot-reload occasionally leaks ghost bot slots** on the Revive
   side. After a `css_plugins reload InsanityPaints`, the roster can
   grow past `FleetSize` with stale entities. They show up as not
