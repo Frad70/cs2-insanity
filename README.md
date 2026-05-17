@@ -4,7 +4,8 @@
 
 Three-plugin stack that turns CS2 dedicated bots into clients indistinguishable from real
 players on the scoreboard — synthetic SteamIDs, persona names from a curated pool, jittered
-ping, no `BOT` icon, and now custom paintkits + knives + gloves to match.
+ping, no `BOT` icon, and now custom paintkits + knives + gloves + agents + StatTrak counters
+to match.
 
 ## Layout
 
@@ -12,7 +13,7 @@ ping, no `BOT` icon, and now custom paintkits + knives + gloves to match.
 | ----------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `InsanityRevive/` | CSSharp (CounterStrikeSharp / .NET) | Owns lifecycle: spawns bots via `bot_add`, overwrites identity (name, SteamID, profile, ping), JSONL telemetry, ProcessUsercmds detour, mapchange survival. Source of truth for the shared pool. |
 | `InsanityHider/`  | Metamod:Source (C++)                | Sits early in the engine callback chain. On `OnClientConnected` post-hook, flips `m_bFakePlayer = 0` for slots marked in the shared pool — *before* the engine's userinfo broadcast leaves the server. That's what kills the `BOT` icon and renders ping in the scoreboard column instead. |
-| `InsanityPaints/` | CSSharp (CounterStrikeSharp / .NET) | Applies weapon paints / knife swaps / glove models. Real-player loadouts persist per-SteamID; Revive-bot loadouts are derived deterministically from the persona name (SHA-256 over UTF-8). Read-only consumer of the shared pool — never writes. |
+| `InsanityPaints/` | CSSharp (CounterStrikeSharp / .NET) | Weapon paints + knives + gloves + agents (player models) + dynamic StatTrak counters (per-SteamID for humans, per-persona for bots) + named loadout layouts. Bundled web admin panel (`http://127.0.0.1:27018/`) with in-game `+lookatweapon` inspect. Real-player loadouts persist per-SteamID; Revive-bot loadouts are derived deterministically from the persona name (SHA-256 over UTF-8). Read-only consumer of the shared pool — never writes. |
 
 ### Required CS2 setting
 

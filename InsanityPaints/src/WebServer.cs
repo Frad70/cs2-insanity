@@ -360,10 +360,14 @@ public sealed class WebServer : IDisposable
     {
         WriteJson(ctx.Response, 200, new
         {
-            weapons = _db.Weapons,
-            knives  = _db.Knives,
-            gloves  = _db.Gloves,
-            agents  = _db.Agents,
+            weapons    = _db.Weapons,
+            knives     = _db.Knives,
+            gloves     = _db.Gloves,
+            agents     = _db.Agents,
+            music_kits = _db.MusicKits,
+            pins       = _db.Pins,
+            stickers   = _db.Stickers,
+            keychains  = _db.Keychains,
             weapon_labels = WeaponLabels,
         });
     }
@@ -488,6 +492,9 @@ public sealed class WebServer : IDisposable
                         gloves_ct= resolved.GlovesCT,
                         agent_t  = resolved.AgentT,
                         agent_ct = resolved.AgentCT,
+                        music_kit = resolved.MusicKit,
+                        pin_t    = resolved.PinT,
+                        pin_ct   = resolved.PinCT,
                     });
                 }
             }

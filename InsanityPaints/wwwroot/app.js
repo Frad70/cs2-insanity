@@ -283,7 +283,14 @@ function renderLayoutBar() {
 }
 
 function emptyLoadout() {
-  return { weapons: {}, knives_t: 0, knives_ct: 0, gloves_t: null, gloves_ct: null, agent_t: 0, agent_ct: 0 };
+  return {
+    weapons: {},
+    knives_t: 0, knives_ct: 0,
+    gloves_t: null, gloves_ct: null,
+    agent_t: 0, agent_ct: 0,
+    music_kit: 0,
+    pin_t: 0, pin_ct: 0,
+  };
 }
 
 // Render weapons list + knife / glove slot buttons. Works for both
@@ -321,10 +328,46 @@ function renderEditorState(loadout, readonly) {
   setAgentLabel("slot-agent-t",  loadout.agent_t  || 0);
   setAgentLabel("slot-agent-ct", loadout.agent_ct || 0);
 
+  // Music kit + pins.
+  setSimpleLabel("slot-music-kit", loadout.music_kit || 0, musicKitLabel);
+  setSimpleLabel("slot-pin-t",     loadout.pin_t     || 0, pinLabel);
+  setSimpleLabel("slot-pin-ct",    loadout.pin_ct    || 0, pinLabel);
+
   $$(".slot-btn").forEach((b) => {
     b.disabled = readonly;
     b.onclick = readonly ? null : () => onSlotClick(b.dataset.slot);
   });
+}
+
+function setSimpleLabel(id, defindex, namer) {
+  const btn = $("#" + id);
+  btn.textContent = defindex ? namer(defindex) : "—";
+}
+function musicKitLabel(defindex) {
+  const e = (state.catalogs.music_kits || []).find((x) => x.defindex === defindex);
+  return e ? e.name : `music #${defindex}`;
+}
+function pinLabel(defindex) {
+  const e = (state.catalogs.pins || []).find((x) => x.defindex === defindex);
+  return e ? e.name : `pin #${defindex}`;
+}
+function stickerLabel(defindex) {
+  if (!defindex) return "— empty —";
+  const e = (state.catalogs.stickers || []).find((x) => x.defindex === defindex);
+  return e ? e.name : `sticker #${defindex}`;
+}
+function keychainLabel(defindex) {
+  if (!defindex) return "— none —";
+  const e = (state.catalogs.keychains || []).find((x) => x.defindex === defindex);
+  return e ? e.name : `keychain #${defindex}`;
+}
+function stickerImage(defindex) {
+  const e = (state.catalogs.stickers || []).find((x) => x.defindex === defindex);
+  return e?.image || "";
+}
+function keychainImage(defindex) {
+  const e = (state.catalogs.keychains || []).find((x) => x.defindex === defindex);
+  return e?.image || "";
 }
 
 function weaponRow(def, loadout, readonly) {
@@ -364,6 +407,7 @@ function weaponRow(def, loadout, readonly) {
     </div>
     ${readonly ? "" : `
       <button class="row-change">Change</button>
+      <button class="row-stickers" title="Stickers + keychain">🪪</button>
       <button class="row-del" title="remove">×</button>
     `}
   `;
@@ -396,8 +440,9 @@ function weaponRow(def, loadout, readonly) {
     $(".attr-nametag", div).addEventListener("input", (e) => {
       ld.nametag = e.target.value;
     });
-    $(".row-change", div).addEventListener("click", () => onWeaponPaintPick(def));
-    $(".row-del",    div).addEventListener("click", () => {
+    $(".row-change",   div).addEventListener("click", () => onWeaponPaintPick(def));
+    $(".row-stickers", div).addEventListener("click", () => openStickerKeychainModal(def));
+    $(".row-del",      div).addEventListener("click", () => {
       delete state.currentLoadout.weapons[def];
       renderEditorState(state.currentLoadout, false);
     });
@@ -493,6 +538,159 @@ function onSlotClick(slot) {
     return openGlovePicker(slot);
   if (slot === "agent_t" || slot === "agent_ct")
     return openAgentPicker(slot);
+  if (slot === "music_kit")
+    return openMusicKitPicker();
+  if (slot === "pin_t" || slot === "pin_ct")
+    return openPinPicker(slot);
+}
+
+function openMusicKitPicker() {
+  const all = state.catalogs.music_kits || [];
+  const choices = all.map((m) => ({
+    key:   String(m.defindex),
+    label: m.name,
+    image: m.image,
+  }));
+  openPicker("Pick a music kit", [
+    { key: "0", label: "— default (no music kit) —" },
+    ...choices,
+  ], (defStr) => {
+    state.currentLoadout.music_kit = Number(defStr);
+    renderEditorState(state.currentLoadout, false);
+  });
+}
+
+function openPinPicker(slot) {
+  const all = state.catalogs.pins || [];
+  const choices = all.map((p) => ({
+    key:   String(p.defindex),
+    label: p.name,
+    image: p.image,
+  }));
+  const sideLabel = slot === "pin_t" ? "T" : "CT";
+  openPicker(`Pick ${sideLabel} pin`, [
+    { key: "0", label: "— no pin —" },
+    ...choices,
+  ], (defStr) => {
+    const v = Number(defStr);
+    if (slot === "pin_t")  state.currentLoadout.pin_t  = v;
+    else                    state.currentLoadout.pin_ct = v;
+    renderEditorState(state.currentLoadout, false);
+  });
+}
+
+// Sticker / keychain picker for a specific weapon — opens a dedicated
+// modal with 4 sticker-slot rows + 1 keychain row. Each row pops the
+// regular picker for selecting the sticker / charm catalog entry.
+function openStickerKeychainModal(def) {
+  const loadout = state.currentLoadout.weapons[def];
+  if (!loadout) return;
+  // Make sure stickers array exists at the right shape.
+  if (!Array.isArray(loadout.stickers) || loadout.stickers.length !== 4) {
+    loadout.stickers = [0, 0, 0, 0];
+  }
+  // Render a mini-DOM inline using the picker shell — but with 5 custom
+  // rows instead of the grid. We piggyback off openPicker semantics by
+  // hijacking the modal; simpler is to build an inline overlay.
+  const modal = $("#sticker-modal");
+  if (!modal) buildStickerModalShell();
+  populateStickerModal(def);
+  $("#sticker-modal").classList.remove("hidden");
+}
+
+function buildStickerModalShell() {
+  const node = document.createElement("div");
+  node.id = "sticker-modal";
+  node.className = "modal hidden";
+  node.innerHTML = `
+    <div class="modal-card">
+      <header>
+        <h3 id="sticker-modal-title">Stickers + keychain</h3>
+        <button id="sticker-modal-close">×</button>
+      </header>
+      <div class="sticker-list" id="sticker-modal-list"></div>
+    </div>`;
+  document.body.appendChild(node);
+  $("#sticker-modal-close").addEventListener("click", () => $("#sticker-modal").classList.add("hidden"));
+  node.addEventListener("click", (e) => { if (e.target === node) node.classList.add("hidden"); });
+}
+
+function populateStickerModal(def) {
+  const loadout = state.currentLoadout.weapons[def];
+  const wlabel = state.catalogs.weapon_labels[def] || `def #${def}`;
+  $("#sticker-modal-title").textContent = `Stickers + keychain — ${wlabel}`;
+  const list = $("#sticker-modal-list");
+  list.innerHTML = "";
+  // 4 sticker rows.
+  for (let slot = 0; slot < 4; slot++) {
+    const def_st = loadout.stickers[slot] || 0;
+    const row = document.createElement("div");
+    row.className = "sticker-row";
+    row.innerHTML = `
+      <img src="${escapeAttr(stickerImage(def_st))}" onerror="this.style.visibility='hidden'" />
+      <div class="lbl">Slot ${slot}</div>
+      <div class="name">${escapeHtml(stickerLabel(def_st))}</div>
+      <button class="ghost pick">Pick</button>
+      <button class="ghost del" ${def_st ? "" : "disabled"}>×</button>
+    `;
+    $(".pick", row).addEventListener("click", () => pickSticker(def, slot));
+    $(".del",  row).addEventListener("click", () => {
+      loadout.stickers[slot] = 0;
+      populateStickerModal(def);
+      renderEditorState(state.currentLoadout, false);
+    });
+    list.appendChild(row);
+  }
+  // Keychain row.
+  const kc = loadout.keychain || 0;
+  const kcRow = document.createElement("div");
+  kcRow.className = "sticker-row keychain";
+  kcRow.innerHTML = `
+    <img src="${escapeAttr(keychainImage(kc))}" onerror="this.style.visibility='hidden'" />
+    <div class="lbl">Charm</div>
+    <div class="name">${escapeHtml(keychainLabel(kc))}</div>
+    <button class="ghost pick">Pick</button>
+    <button class="ghost del" ${kc ? "" : "disabled"}>×</button>
+  `;
+  $(".pick", kcRow).addEventListener("click", () => pickKeychain(def));
+  $(".del",  kcRow).addEventListener("click", () => {
+    loadout.keychain = 0;
+    populateStickerModal(def);
+    renderEditorState(state.currentLoadout, false);
+  });
+  list.appendChild(kcRow);
+}
+
+function pickSticker(def, slot) {
+  const choices = (state.catalogs.stickers || []).map((s) => ({
+    key:   String(s.defindex),
+    label: s.name,
+    image: s.image,
+  }));
+  $("#sticker-modal").classList.add("hidden");
+  openPicker(`Sticker slot ${slot}`, choices, (defStr) => {
+    const loadout = state.currentLoadout.weapons[def];
+    if (!Array.isArray(loadout.stickers) || loadout.stickers.length !== 4) {
+      loadout.stickers = [0, 0, 0, 0];
+    }
+    loadout.stickers[slot] = Number(defStr);
+    renderEditorState(state.currentLoadout, false);
+    openStickerKeychainModal(def);  // re-open the sticker modal
+  });
+}
+
+function pickKeychain(def) {
+  const choices = (state.catalogs.keychains || []).map((k) => ({
+    key:   String(k.defindex),
+    label: k.name,
+    image: k.image,
+  }));
+  $("#sticker-modal").classList.add("hidden");
+  openPicker("Pick a keychain", choices, (defStr) => {
+    state.currentLoadout.weapons[def].keychain = Number(defStr);
+    renderEditorState(state.currentLoadout, false);
+    openStickerKeychainModal(def);
+  });
 }
 
 $("#weapons-add").addEventListener("click", () => {

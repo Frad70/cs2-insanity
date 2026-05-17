@@ -388,6 +388,72 @@ main { flex: 1; overflow: hidden; }
   object-fit: contain;
 }
 .slot-row button { padding: 4px 10px; font-size: 12px; flex-shrink: 0; }
+.slot-row .row-stickers {
+  background: transparent;
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  padding: 4px 8px;
+}
+.slot-row .row-stickers:hover {
+  background: var(--accent-2);
+  color: var(--bg);
+}
+
+/* Sticker / keychain mini-modal — 5 rows per weapon (4 stickers + 1
+   charm). Uses the same modal shell as the main picker. */
+#sticker-modal .modal-card {
+  max-width: 720px;
+  max-height: 85vh;
+}
+.sticker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  overflow-y: auto;
+}
+.sticker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.sticker-row img {
+  width: 64px; height: 48px;
+  object-fit: contain;
+  background: var(--bg-2);
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.sticker-row .lbl {
+  width: 60px;
+  font-size: 11px;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.sticker-row .name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sticker-row button {
+  padding: 4px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.sticker-row.keychain .lbl {
+  color: var(--accent-2);
+}
+
+/* Full-width slot button (music kit row uses one button, not T/CT
+   pair). */
+.slot-btn.full { width: 100%; text-align: left; }
 .slot-row .row-del {
   background: transparent;
   color: var(--fg-mute);

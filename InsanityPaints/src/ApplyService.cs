@@ -272,6 +272,8 @@ public sealed class ApplyService
         // pawn's EconGloves and WeaponServices being in their post-spawn
         // shape. Cheap if no agent is set (just early-return).
         ApplyAgent(player, pawn, kind);
+        ApplyMusicKit(player, kind);
+        ApplyPin(player, kind);
         ApplyGloves(player, pawn, kind);
 
         var weapons = pawn.WeaponServices?.MyWeapons;
@@ -281,6 +283,65 @@ public sealed class ApplyService
             if (!handle.IsValid || handle.Value == null || !handle.Value.IsValid) continue;
             ApplyToWeapon(player, handle.Value);
         }
+    }
+
+    /// <summary>Apply the player's selected music kit (MVP anthem +
+    /// round-start/end music). Single slot per controller, no team
+    /// dimension. CS2 sets the live music via two fields:
+    /// CCSPlayerController.MusicKitID and InventoryServices.MusicID.</summary>
+    private void ApplyMusicKit(CCSPlayerController player, PlayerKind kind)
+    {
+        int kitId = ChooseMusicKit(player, kind);
+        if (kitId <= 0) return;
+        try
+        {
+            player.MusicKitID = kitId;
+            if (player.InventoryServices != null) player.InventoryServices.MusicID = (ushort)kitId;
+            Utilities.SetStateChanged(player, "CCSPlayerController", "m_iMusicKitID");
+            Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
+        }
+        catch (Exception ex) { Log.Debug($"ApplyMusicKit: {ex.Message}"); }
+    }
+
+    /// <summary>Apply the player's collectible pin to the scoreboard /
+    /// MVP screen. CS2 stores pins in InventoryServices.Rank[5] (the
+    /// pin slot specifically — Rank[0..4] are for ranks / medals).
+    /// Per-team because the picker offers a separate pin for T and CT
+    /// sides.</summary>
+    private void ApplyPin(CCSPlayerController player, PlayerKind kind)
+    {
+        var team = (CsTeam)player.TeamNum;
+        if (team is CsTeam.None or CsTeam.Spectator) return;
+        int pinId = ChoosePin(player, kind, team);
+        if (pinId <= 0 || player.InventoryServices == null) return;
+        try
+        {
+            player.InventoryServices.Rank[5] = (MedalRank_t)pinId;
+            Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
+        }
+        catch (Exception ex) { Log.Debug($"ApplyPin: {ex.Message}"); }
+    }
+
+    private int ChooseMusicKit(CCSPlayerController player, PlayerKind kind)
+    {
+        if (kind == PlayerKind.Human)
+        {
+            var pl = _players.TryGet(player.SteamID);
+            return pl?.MusicKit ?? 0;
+        }
+        return _resolver.Resolve(BotSeed(player)).MusicKit;
+    }
+
+    private int ChoosePin(CCSPlayerController player, PlayerKind kind, CsTeam team)
+    {
+        if (kind == PlayerKind.Human)
+        {
+            var pl = _players.TryGet(player.SteamID);
+            if (pl == null) return 0;
+            return team == CsTeam.Terrorist ? pl.PinT : pl.PinCT;
+        }
+        var resolved = _resolver.Resolve(BotSeed(player));
+        return team == CsTeam.Terrorist ? resolved.PinT : resolved.PinCT;
     }
 
     /// <summary>Set the player's character model via the agent's .vmdl path.
@@ -359,6 +420,7 @@ public sealed class ApplyService
             if (knifePaint != null)
             {
                 ApplyPaintFields(weapon, knifePaint);
+                ApplyStickersAndKeychain(weapon, knifePaint);
             }
 
             // For bots, the knife defindex picked above is the StatTrak
@@ -389,12 +451,56 @@ public sealed class ApplyService
         weapon.AttributeManager.Item.NetworkedDynamicAttributes.Attributes.RemoveAll();
 
         ApplyPaintFields(weapon, paint);
+        ApplyStickersAndKeychain(weapon, paint);
         OverlayBotStatTrak(player, kind, weapon, defindex);
         BumpItemId(weapon);
         SetEcon(weapon, player);
         SetMeshGroup(weapon, defindex, paint.Paint);
         UpdatedStateChanged(player, weapon);
     }
+
+    /// <summary>Write the 4 sticker slots + 1 keychain slot onto the
+    /// weapon's attribute list. Each non-zero entry produces a sticker
+    /// at the matching defindex, with default placement / scale /
+    /// rotation. Cosmetic offsets and rotation are out of scope for
+    /// the first cut — admins picking "AK-47 | Vulcan with a Howling
+    /// Dawn slot 0 sticker" is the common case; fine-tuning where on
+    /// the gun it sits can come later.
+    ///
+    /// Lifted from Nereziel's SetStickers / SetKeychain (the attribute
+    /// names + ViewAsFloat int→float reinterpret are the only stable
+    /// way to push these through the engine's econ pipeline).</summary>
+    private void ApplyStickersAndKeychain(CBasePlayerWeapon weapon, WeaponLoadout loadout)
+    {
+        var handle = weapon.AttributeManager.Item.NetworkedDynamicAttributes.Handle;
+        if (loadout.Stickers != null)
+        {
+            for (int slot = 0; slot < loadout.Stickers.Length && slot < 4; slot++)
+            {
+                int stickerDef = loadout.Stickers[slot];
+                if (stickerDef <= 0) continue;
+                // ViewAsFloat reinterprets the int's bits as a float — the
+                // engine stores attribute values as float-only, but the
+                // semantic for "sticker id" is uint, so we smuggle it.
+                SetAttribute(handle, $"sticker slot {slot} id",       ViewAsFloat((uint)stickerDef));
+                SetAttribute(handle, $"sticker slot {slot} offset x", 0f);
+                SetAttribute(handle, $"sticker slot {slot} offset y", 0f);
+                SetAttribute(handle, $"sticker slot {slot} wear",     0f);
+                SetAttribute(handle, $"sticker slot {slot} scale",    1f);
+                SetAttribute(handle, $"sticker slot {slot} rotation", 0f);
+            }
+        }
+        if (loadout.Keychain > 0)
+        {
+            SetAttribute(handle, "keychain slot 0 id",       ViewAsFloat((uint)loadout.Keychain));
+            SetAttribute(handle, "keychain slot 0 offset x", 0f);
+            SetAttribute(handle, "keychain slot 0 offset y", 0f);
+            SetAttribute(handle, "keychain slot 0 offset z", 0f);
+            SetAttribute(handle, "keychain slot 0 seed",     ViewAsFloat(0));
+        }
+    }
+
+    private static float ViewAsFloat(uint v) => BitConverter.UInt32BitsToSingle(v);
 
     /// <summary>Toggle the weapon's bodygroup so the engine renders the
     /// right mesh for the applied paintkit. CS2 weapons ship with two

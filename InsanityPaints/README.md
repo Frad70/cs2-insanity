@@ -1,35 +1,28 @@
 # InsanityPaints
 
-> **Early alpha — Phase 1.** Skins for weapons, knives, and gloves.
-> Stickers, keychains, real-StatTrak counters, and bot-psychology-driven
-> skin selection are deliberately *out of scope* for this revision —
-> see the [Roadmap](#roadmap) section.
+> **Alpha v0.1.0.** Weapons / knives / gloves / agents / music kits /
+> pins / stickers / keychains, dynamic StatTrak, named loadout layouts,
+> in-game inspect, web admin panel.
 
-Third plugin in the `cs2-insanity` stack. Slaps custom paintkits, knife
-swaps, and glove models onto:
+Third plugin in the [`cs2-insanity`](../) stack. Slaps custom paintkits,
+knife swaps, glove models, character models (agents), music kits and
+pins onto:
 
-- **Real players** with admin permissions, picking via in-chat menus —
-  selections persist in a JSON file keyed by SteamID64.
-- **InsanityRevive-managed bots** — loadout is derived deterministically
-  from the bot's persona name, so `Andrey_K` carries the same AK across
-  rounds, mapchanges, and full server restarts.
-- **Not** `bot_add` engine bots. They stay vanilla so they're easy to tell
-  apart in experiments. Toggle via `apply_to_revive_bots` if you want
-  bots untouched too.
+- **Real players** with admin permissions, picking via in-chat menus or
+  the bundled web panel — selections persist per SteamID64 with
+  unlimited named loadout presets (`asiimov`, `fade`, `cheap`, …) and
+  one always-present `default`.
+- **InsanityRevive-managed bots** — every loadout axis is derived
+  deterministically from the bot's persona name (SHA-256 of UTF-8
+  bytes). `Andrey_K` carries the same AK paint, same knife, same
+  gloves, same agent across rounds, mapchanges, and full server
+  restarts.
+- **Not** `bot_add` engine bots. They stay vanilla so they're easy to
+  tell apart in experiments. Toggle via `apply_to_revive_bots` if you
+  want managed bots also untouched (see [Known issues](#known-issues)
+  — this is currently the recommended setting).
 
-## How it talks to InsanityRevive
-
-`InsanityPaints` is a **read-only** consumer of the shared mmap pool at
-`/tmp/insanityrevive_fake_slots.bin`. It only reads `managed[120]` to
-distinguish Revive bots from `bot_add` engine bots. No writes — the pool
-is owned by `InsanityRevive`, and we never touch any byte of it.
-
-If the pool file isn't there (Revive hasn't loaded yet), `FakeSlotsReader`
-returns `IsManaged == false` for every slot and the plugin treats only
-real humans. Each `EventPlayerSpawn` we opportunistically retry the
-`TryOpen`, so once Revive comes up the bots start getting their skins.
-
-## CS2 server-side guidelines flag
+## Required CS2 setting
 
 `core.json` must have:
 
@@ -43,11 +36,62 @@ Without that, CSSharp blocks the `m_iItemDefinitionIndex` /
 `m_nFallbackPaintKit` writes and skins silently do nothing. See the
 top-level `cs2-insanity` README for the full warning.
 
+## How it talks to InsanityRevive
+
+`InsanityPaints` is a **read-only** consumer of the shared mmap pool
+at `/tmp/insanityrevive_fake_slots.bin`. It reads two things from the
+pool:
+
+- `managed[120]` — distinguishes Revive-managed bots from `bot_add`
+  engine bots and human players.
+- The 32-byte UTF-8 persona name slot for each managed bot (offset
+  136 onwards in pool layout v7). This is **stable**: it's written
+  synchronously by Revive before the slot is marked managed, so by
+  the time `IsManaged()` returns true the name is already there.
+  We use this as the seed for `BotLoadoutResolver` instead of
+  `player.PlayerName` because the engine name is overwritten
+  asynchronously and can briefly read `Bot01` on early ticks.
+
+No writes — the pool is owned by Revive, and we never touch any byte
+of it. If the pool file isn't there (Revive hasn't loaded yet),
+`FakeSlotsReader.IsManaged` returns `false` for every slot and the
+plugin treats only real humans.
+
+## Web panel
+
+The headline feature. Built-in HTTP server (System.Net.HttpListener,
+no NuGet), serves a single-page UI from `wwwroot/`.
+
+- **URL**: `http://127.0.0.1:27018/` by default (configurable bind
+  and port in `settings.json`)
+- **Auth**: bearer token, auto-generated on first run, stored in
+  `settings.json` under `web_token`. The UI's login screen asks for
+  it once and caches in browser localStorage.
+
+What it does:
+
+- **Players tab** — live roster on the left (online + stored
+  loadouts), editor on the right.
+  - Layout dropdown at the top: switch between named presets, `+ New`
+    saves the current state as a new layout, `Rename`, `× Delete`
+    (default is protected).
+  - Weapons list with image previews, skin name, wear slider, seed
+    number input, StatTrak checkbox + count, nametag text input. Each
+    paint pick offers a **👁 Inspect** button that temporarily applies
+    the paint to your live weapon and fires `+lookatweapon` for the
+    in-game inspect animation.
+  - Knife + paint + glove + agent slots (T / CT pickers, team-locked).
+  - Sticky **Save & reload** bar at the bottom + **🎲 Randomize
+    seeds** rolls a fresh seed for every weapon and glove in one
+    click.
+- **Bots tab** — read-only card per managed bot with their resolver
+  picks (weapons, knives, gloves, agents). Lifetime StatTrak counters
+  per persona live in `bots.json`.
+- **Catalog tab** — browse the full 1978-paintkit catalog with search.
+
 ## Chat commands
 
 All admin-gated by the flag in `settings.json` (default `@css/root`).
-Non-admins get a chat refusal so they know the command exists but isn't
-open to them.
 
 | Command   | Action                                                          |
 | --------- | --------------------------------------------------------------- |
@@ -55,116 +99,172 @@ open to them.
 | `!knife`  | Pick a knife defindex for the current team, then a paint        |
 | `!gloves` | Pick a glove model + paint for the current team                 |
 
-Changes are applied on the next spawn or weapon pickup (no `!rs` /
-respawn dance). Picks save to
-`csgo/addons/counterstrikesharp/configs/plugins/InsanityPaints/players.json`
-immediately.
+Changes apply on the next spawn or weapon pickup. Picks save to
+`players.json` immediately. The full editor (layouts, agents, wear,
+StatTrak, inspect) lives in the web panel — chat commands cover the
+common case of "swap one paint mid-round".
 
 ## Console commands
 
-| Command                          | Purpose                                                                                  |
-| -------------------------------- | ---------------------------------------------------------------------------------------- |
-| `css_insanity_paints_reload`     | Hot-reload `settings.json`, the three catalogs, and `players.json`. No restart required. |
+| Command                      | Purpose                                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| `css_insanity_paints_reload` | Hot-reload `settings.json`, all catalogs, `players.json`, `bots.json`. No restart needed. |
 
-Server console can always call it; in-game callers need the admin flag.
+Server console can always call it; in-game callers need the admin
+flag. **Caveat**: hot-reloads have been observed to leak "ghost"
+managed-bot slots on the Revive side. If a roster grows past expected
+size after a reload, full process restart fixes it.
 
 ## Configuration files
 
-All live under
-`csgo/addons/counterstrikesharp/configs/plugins/InsanityPaints/`. The
-plugin creates `settings.json` and an empty `players.json` on first run;
-the three catalogs are shipped with the build.
+All under `csgo/addons/counterstrikesharp/configs/plugins/InsanityPaints/`.
+The plugin creates `settings.json` (with a fresh random `web_token`)
+and an empty `players.json` on first run; the catalogs are shipped
+with the build.
 
-| File                  | Purpose                                                                                |
-| --------------------- | -------------------------------------------------------------------------------------- |
-| `settings.json`       | Plugin-wide flags: enable_weapons / _knives / _gloves, admin flag, log level, etc.     |
-| `weapons_paints.json` | The pool of `(weapon_defindex, paint, name)` rows the menus and bot resolver pick from |
-| `knives.json`         | List of knife defindexes that can be assigned to a team                                |
-| `gloves.json`         | List of `(glove_defindex, paint, name)` glove models                                   |
-| `players.json`        | Per-SteamID64 stored loadout (written by chat commands)                                |
+| File                  | Purpose                                                                                                     |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `settings.json`       | Plugin flags, web bind / port / token, admin flag, log level, pool path                                     |
+| `players.json`        | Per-SteamID64 named-layout wrappers — see below                                                             |
+| `bots.json`           | Per-persona-name `{weapons: {def: kills}}` for dynamic StatTrak                                             |
+| `weapons_paints.json` | `(weapon_defindex, paint, name, image, legacy_model)` rows — every paintkit Valve has ever shipped (1978)   |
+| `knives.json`         | Knife defindexes + engine names (20 entries)                                                                |
+| `gloves.json`         | `(defindex, paint, name, image)` glove rows (90 entries)                                                    |
+| `agents.json`         | `(defindex, team, model, name, image)` character models (63 entries: 34 T + 29 CT)                          |
+| `music_kits.json`     | `(defindex, name, image)` music kits (189) — applied via `MusicKitID` + `InventoryServices.MusicID`         |
+| `pins.json`           | `(defindex, name, image)` collectible pins (79) — applied via `InventoryServices.Rank[5]` per team          |
+| `stickers.json`       | `(defindex, name, image)` stickers (9669) — applied via `sticker slot N id` attribute injection (4 slots)   |
+| `keychains.json`      | `(defindex, name, image)` weapon charms (78) — applied via `keychain slot 0 id` per weapon                  |
 
-### Catalog schemas
-
-`weapons_paints.json` is a flat list:
-
-```json
-[
-  { "weapon_defindex": 7, "paint": 1100, "name": "AK-47 | Vulcan" },
-  { "weapon_defindex": 7, "paint": 309,  "name": "AK-47 | Redline" }
-]
-```
-
-`knives.json` is one row per knife defindex:
+### players.json format
 
 ```json
-[
-  { "defindex": 515, "weapon_name": "weapon_knife_butterfly", "name": "Butterfly Knife" }
-]
+{
+  "76561198000000001": {
+    "active": "default",
+    "layouts": {
+      "default": {
+        "weapons": {
+          "7":  { "paint": 1100, "seed": 0, "wear": 0.01, "stattrak": -1, "nametag": "" },
+          "16": { "paint": 309,  "seed": 0, "wear": 0.05, "stattrak": 42, "nametag": "owned" }
+        },
+        "knives_t":  515,
+        "knives_ct": 508,
+        "gloves_t":  { "defindex": 5032, "paint": 10037, "seed": 0, "wear": 0.05 },
+        "gloves_ct": { "defindex": 5034, "paint": 10037, "seed": 0, "wear": 0.05 },
+        "agent_t":   4732,
+        "agent_ct":  4753
+      },
+      "asiimov": { "...": "another full PlayerLoadout..." }
+    }
+  }
+}
 ```
 
-`gloves.json` is one row per glove model + paint pairing:
+The v1 schema (flat `PlayerLoadout` per SteamID, no `layouts` wrapper)
+is auto-migrated on load. First save rewrites in the v2 form.
+
+### bots.json format
 
 ```json
-[
-  { "defindex": 5032, "paint": 10037, "name": "Specialist Gloves | Field Agent" }
-]
+{
+  "ZywOo":  { "weapons": { "9": 42 } },
+  "s1mple": { "weapons": { "9": 17, "16": 8 } }
+}
 ```
 
-Extending any of them is just appending entries and either running
-`css_insanity_paints_reload` or restarting the server.
+`weapons` maps weapon defindex → kill count. Incremented on every
+managed-bot kill via `OnPlayerDeath` (saved every kill — file is
+tiny).
 
 ## How a bot's loadout is decided
 
-`BotLoadoutResolver` takes the bot's `persona.Name` (the same name that
-Revive injects into the engine), produces a SHA-256 digest over its UTF-8
-bytes, takes the first 8 bytes as a `ulong`, and uses modulo against the
-relevant catalog length.
+`BotLoadoutResolver` reads the persona name from the pool slot,
+SHA-256 over its UTF-8 bytes, takes the first 8 bytes as `ulong`,
+modulo against the catalog length for each axis.
 
 Why SHA-256 and not `string.GetHashCode()` — the latter is randomized
-per-process in modern .NET for security, so the same bot would catch a
-different skin on every server restart. The SHA-256 path is stable
+per-process in modern .NET for security, so the same bot would catch
+a different skin on every server restart. The SHA-256 path is stable
 across processes, .NET versions, and machines.
 
-To break ties between the three axes (weapon, knife, gloves), a small
-ASCII prefix is mixed in before hashing — `w7:Andrey_K`, `kT:Andrey_K`,
-`gCT:Andrey_K`, etc. — so a bot can carry a different paint on every
-weapon and still be deterministic.
+To break ties between axes, a small ASCII prefix is mixed in before
+hashing: `w7:Andrey_K`, `kT:Andrey_K`, `gCT:Andrey_K`, `aT:Andrey_K`,
+`mk:Andrey_K`, etc. So a bot can carry a distinct weapon paint /
+knife / glove / agent / music kit / pin and still be deterministic.
 
 ## Apply path
 
 The skin write itself is lifted (in spirit, not in copy) from
 [Nereziel/cs2-WeaponPaints](https://github.com/Nereziel/cs2-WeaponPaints).
-The minimal Phase-1 path:
 
-1. `EventPlayerSpawn` → `Server.NextFrame` so `pawn.WeaponServices.MyWeapons`
-   is populated.
-2. `Listeners.OnEntitySpawned` for `weapon_*` entities → `Server.NextWorldUpdate`,
-   so mid-round buys catch the right paint without a respawn.
+1. `EventPlayerSpawn` → `Server.NextFrame` so the pawn's
+   `WeaponServices.MyWeapons` is populated.
+2. `Listeners.OnEntitySpawned` for `weapon_*` entities →
+   `Server.NextWorldUpdate`, so mid-round buys catch the right paint
+   without a respawn.
 3. Per weapon:
-   - Knife: `AcceptInput("ChangeSubclass", newDefindex)`, set
+   - **Knife**: `AcceptInput("ChangeSubclass", newDefindex)`, set
      `EntityQuality = 3`, clear attribute lists.
    - Set `ItemID / ItemIDLow / ItemIDHigh` to a fresh per-apply value
-     starting at `16384`.
-   - Set `FallbackPaintKit / FallbackSeed / FallbackWear`.
-   - Inject `set item texture prefab/seed/wear` into both attribute
-     lists via the `CAttributeList_SetOrAddAttributeValueByName`
-     gamedata signature. The `Fallback*` fields cover most older
-     paintkits; the attribute injection covers everything else,
-     including newer paintkits that silently no-op without it.
-   - Optional StatTrak: set `EntityQuality = 9` and `FallbackStatTrak = N`
-     (count doesn't tick — see Roadmap).
-4. Gloves: `pawn.EconGloves.ItemDefinitionIndex = …`, clear attributes,
-   inject paint/seed/wear via the same signature (`CEconItemView` has
-   no `Fallback*` fields, so the attribute write is the *only* way to
-   get a paint onto gloves), `lastinv` toggle on either side of a
-   `NextFrame` to nudge the model refresh.
+     (starting at 16384, monotonically bumped).
+   - Set `FallbackPaintKit / FallbackSeed / FallbackWear` and the
+     `nametag` via `CustomName`.
+   - Inject `set item texture prefab/seed/wear` attributes via the
+     `CAttributeList_SetOrAddAttributeValueByName` gamedata signature.
+     The `Fallback*` fields cover most older paintkits; the attribute
+     injection covers newer paintkits that silently no-op on `Fallback*`
+     alone.
+   - StatTrak: humans get a toggleable counter that ticks on every kill
+     by that weapon, persisted to `players.json` per-SteamID. Bots get
+     an always-on counter persisted to `bots.json` per-persona; both
+     resolve `EntityQuality = 9` + `FallbackStatTrak = N`.
+   - **bodygroup toggle**: `AcceptInput("SetBodygroup", "body,0")` for
+     modern Source 2 skins, `body,1` for legacy CS:GO-era ones. The
+     `legacy_model` flag in `weapons_paints.json` picks which one.
+     Without this toggle, multi-layer skins like Printstream and
+     Doppler render only their base coat (we hit that bug; the apply
+     looked washed out until the bodygroup was set).
+4. **Gloves**: `pawn.EconGloves.ItemDefinitionIndex = …`, clear
+   attributes, inject paint/seed/wear via the same signature
+   (`CEconItemView` has no `Fallback*` fields, so attribute injection
+   is the only path). For humans, a `lastinv` toggle plus a 0.08s
+   timer plus a `SetBodygroup first_or_third_person 0 → 1` pulse
+   makes the new model + paint pop in this very life. For bots, the
+   pulse is **skipped** (spectator views third-person; bots never
+   see their own viewmodel).
+5. **Agents**: `pawn.SetModel(agent.Model)`. The model path is the
+   `.vmdl` shipped with the agent (e.g.
+   `agents/models/ctm_st6/ctm_st6_variantj.vmdl`). Team-locked: T
+   agents only on T side, CT on CT.
 
 The single `CAttributeList_SetOrAddAttributeValueByName` signature
-ships in `gamedata/InsanityPaints.json`. CSSharp resolves it lazily on
-first apply — if it doesn't match the running CS2 build, the plugin
-logs a warning and falls back to `Fallback*` only (basic skins still
-work; gloves and some new paintkits won't). Stickers and keychains
-(Phase 3) would need the same signature plus more attribute names.
+ships in `gamedata/InsanityPaints.json`. CSSharp resolves it lazily
+on first apply — if it doesn't match the running CS2 build, the
+plugin logs a warning and falls back to `Fallback*` only.
+
+## Inspect endpoint
+
+The web panel's `👁 Inspect` button posts to `/api/inspect`:
+
+```json
+POST /api/inspect
+{
+  "steamid":   "76561199...",
+  "weapon_def": 7,
+  "paint":     1100,
+  "seed":      435,
+  "wear":      0.01,
+  "stattrak":  -1,
+  "nametag":   ""
+}
+```
+
+The server looks up your live weapon of that defindex, applies the
+candidate paint **without saving**, fires `+lookatweapon`, and after
+3.5 seconds releases with `-lookatweapon`. Subsequent respawn / buy
+reverts to the saved loadout. Returns 409 if the player isn't holding
+that weapon.
 
 ## Build
 
@@ -173,38 +273,71 @@ cd InsanityPaints
 dotnet build -c Release
 ```
 
-The output `InsanityPaints.dll` goes to
-`csgo/addons/counterstrikesharp/plugins/InsanityPaints/` on the live
-server, alongside the `gamedata/InsanityPaints.json` signature file (the
-CI bundle puts it in `plugins/InsanityPaints/gamedata/`). The three
-catalogs and the `settings.json` template land in
+Output goes to `bin/Release/net8.0/InsanityPaints.dll` plus the
+`wwwroot/` tree copied alongside it. The plugin is deployed to
+`csgo/addons/counterstrikesharp/plugins/InsanityPaints/` with
+`gamedata/InsanityPaints.json` inside it. Catalogs and the
+`settings.json` template land in
 `csgo/addons/counterstrikesharp/configs/plugins/InsanityPaints/`.
+
+CI is in `.github/workflows/build.yml` — deterministic-rebuild guard
++ release packaging.
+
+## Refreshing the catalog
+
+Whenever Valve ships new skins, run the importer:
+
+```bash
+./scripts/import_catalog.py
+```
+
+It pulls fresh JSON from
+[ByMykel/CSGO-API](https://github.com/ByMykel/CSGO-API) and rewrites
+`weapons_paints.json` / `gloves.json` / `music_kits.json` /
+`pins.json` / `stickers.json` / `keychains.json` / `agents.json` with
+the latest set, preserving image URLs and the `legacy_model` flag.
+
+## Known issues
+
+- **Animation-system SIGSEGV during mass bot respawn.** Symptom:
+  SIGSEGV in `libanimationsystem.so` → `libserver.so` (pure-native
+  stack) during the FleetManager bot-spawn burst at boot or
+  round-start. Reproduced repeatedly on 2026-05-16 and 2026-05-17.
+  An earlier discriminator (17 rounds without crash on
+  `apply_to_revive_bots: false`) **falsely implicated** Paints' bot
+  apply path — a follow-up run with the same setting crashed within
+  4 minutes, identical stack. So the trigger is **not in Paints**;
+  it lives in the broader stack (`InsanityHider` m_bFakePlayer flip
+  on mass spawn, the AimHook detour on `CCSBot::UpdateLookAngles`,
+  or the FleetManager cascade itself). Narrowing is open — next
+  candidates: unload Hider for a session, then drop FleetSize from
+  8 to 4 to shrink the spawn burst.
+- **Hot-reload occasionally leaks ghost bot slots** on the Revive
+  side. After a `css_plugins reload InsanityPaints`, the roster can
+  grow past `FleetSize` with stale entities. They show up as not
+  `is_managed_bot` in `/api/online`. Kick them manually with
+  `kickid <slot>` or do a full process restart.
+- **Doppler / Printstream phases** need `legacy_model: false` AND the
+  bodygroup toggle to render their secondary design layer. Already
+  handled — listed here in case the importer ever loses the flag.
 
 ## Roadmap
 
-Phase 2 and 3 are not implemented yet — listed here so the design space
-stays explicit.
-
-- **Phase 2**
-  - Live StatTrak counter. Subscribe to `EventPlayerDeath`, increment a
-    per-SteamID-per-weapon counter (per-persona for Revive bots),
-    persist alongside the loadout. Set `EntityQuality = 9` already
-    happens; what's missing is the `kill eater` attribute write, which
-    requires the `CAttributeList_SetOrAddAttributeValueByName` gamedata
-    signature.
-  - Bot-psychology-driven skin selection. Read `BotProfile` from Revive
-    (likely via a new `psy_type[120]` field in the pool mmap — would be
-    a layout v8 bump on the Revive side) and use it as an extra seed in
-    `BotLoadoutResolver` so e.g. an aggressive bot tends toward
-    aggressive-looking AK skins.
-- **Phase 3**
-  - Stickers — needs the gamedata signature mentioned above and a
-    `stickers.json` catalog.
-  - Keychains / charms — same gamedata signature, separate catalog.
-
-## Not on the menu
-
-Music kits, agents, pins, web admin UI, MySQL persistence, `!wp` /
-`!agent` / `!music` commands. The Nereziel plugin covers all of these
-if you need them — `InsanityPaints` is intentionally smaller in surface
-area.
+- **Mode-B animation crash narrowing.** Workaround `apply_to_revive_bots: false`
+  was disproved (crashes still happen). Real suspect list: Hider
+  `m_bFakePlayer` flip on mass spawn, AimHook `CCSBot::UpdateLookAngles`
+  detour, FleetManager cascade. Need plugin-level discriminators
+  (unload Hider for a session; reduce FleetSize from 8 to 4) to
+  narrow further.
+- **Sticker offset / wear / scale / rotation controls.** Currently
+  every sticker is placed with zero offsets, full scale, no rotation.
+  The attribute names are already there in the apply path; just need
+  UI sliders + persistence in `WeaponLoadout`.
+- **Bot-psychology-driven skin selection.** Read `BotProfile.PsychologyType`
+  from Revive (would be a new `psy_type[120]` field in the pool mmap
+  — layout v8 bump on Revive's side) and use it as an extra seed in
+  `BotLoadoutResolver` so e.g. an aggressive bot tends toward
+  red / neon AK skins. Touches both plugins.
+- **Per-subsystem apply-to-bots toggles**, to let the narrowing
+  experiment (above, in Known issues) re-enable bots' apply path
+  one slice at a time without recompiling.
