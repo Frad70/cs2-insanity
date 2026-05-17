@@ -203,11 +203,26 @@ public sealed class ApplyService
     public void OnPlayerSpawn(CCSPlayerController player)
     {
         if (!ShouldApply(player, out _)) return;
-        Server.NextFrame(() =>
+        // Stagger apply across ticks by slot index. Mass-respawn
+        // (OnPreResetRound / boot fleet-spawn) fires EventPlayerSpawn
+        // for all 8 bots in the same engine tick — the prior
+        // Server.NextFrame queued every ApplyAll into the *same* next
+        // frame, producing 8 simultaneous SetModel + SetBodygroup +
+        // attribute-list writes through animation system. That race
+        // window is what crashes libanimationsystem.so (mode-B). By
+        // spreading 1 tick per slot we keep at most one player's apply
+        // per animation tick — race window closes.
+        //
+        // Cost: skins for slot N visibly pop in N*15.6ms after spawn.
+        // With 64 slot indexes max = ~1s worst case. For typical
+        // 4-12 active players the spread is 60-180ms which is
+        // imperceptible vs the spawn flicker itself.
+        float delay = player.Slot * Server.TickInterval;
+        _plugin.AddTimer(delay, () =>
         {
             try { ApplyAll(player); }
             catch (Exception ex) { Log.Warn($"ApplyAll: {ex.Message}"); }
-        });
+        }, TimerFlags.STOP_ON_MAPCHANGE);
     }
 
     /// <summary>Entry point for newly-spawned weapon entities (so a buy
