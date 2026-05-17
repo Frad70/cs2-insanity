@@ -300,21 +300,26 @@ public sealed class ApplyService
         }
     }
 
-    /// <summary>Apply the player's selected music kit (MVP anthem +
-    /// round-start/end music). Single slot per controller, no team
-    /// dimension. CS2 sets the live music via several fields:
-    ///   - m_iMusicKitID — kit defindex (UI displays the name from this).
-    ///   - InventoryServices.MusicID — same value, mirrored on the
-    ///     inventory side; engine reads both depending on call site.
-    ///   - m_bMvpNoMusic — bool gate. Defaults to true on fake-client
-    ///     slots (Hider-flipped or otherwise), so even with a valid
-    ///     kit ID set, the MVP anthem won't play. Forcing it to false
-    ///     unlocks audio.
-    ///   - m_iMusicKitMVPs — display counter ("0 MVPs with this kit").
-    ///     Not load-bearing for playback but the UI checks this.
-    /// First cut (May 17 morning) wrote only the first two; user
-    /// reported "MVP music shows but doesn't play". Adding
-    /// m_bMvpNoMusic=false and the MVP counter as belt-and-suspenders.</summary>
+    /// <summary>Apply the player's selected music kit. CS2 stores the
+    /// kit ID in two mirrored fields:
+    ///   - <c>CCSPlayerController.MusicKitID</c> / <c>m_iMusicKitID</c>
+    ///   - <c>InventoryServices.MusicID</c>
+    ///
+    /// Display-only: the kit NAME shows up on the scoreboard / MVP
+    /// screen from this. <b>Audio is client-side and gated by Steam
+    /// inventory ownership</b> — observer's CS2 client plays the
+    /// anthem only if the observer owns the kit defindex locally. So
+    /// for bots: silence unless the viewer happens to own that
+    /// random kit. For self: the client overrides our write with the
+    /// viewer's own purchased kit (verified empirically 2026-05-17).
+    /// Server can't change this — it's a CS2 architectural choice,
+    /// presumably to prevent random servers from spamming arbitrary
+    /// music kits at clients who don't own them.
+    ///
+    /// We DON'T write <c>m_bMvpNoMusic</c> or <c>m_iMusicKitMVPs</c> —
+    /// tried both, neither unlocks audio playback for non-owned kits.
+    /// Nereziel intentionally left those commented out for the same
+    /// reason.</summary>
     private void ApplyMusicKit(CCSPlayerController player, PlayerKind kind)
     {
         int kitId = ChooseMusicKit(player, kind);
@@ -322,13 +327,11 @@ public sealed class ApplyService
         try
         {
             player.MusicKitID = kitId;
-            player.MvpNoMusic = false;
             if (player.InventoryServices != null)
             {
                 player.InventoryServices.MusicID = (ushort)kitId;
             }
             Utilities.SetStateChanged(player, "CCSPlayerController", "m_iMusicKitID");
-            Utilities.SetStateChanged(player, "CCSPlayerController", "m_bMvpNoMusic");
             Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
         }
         catch (Exception ex) { Log.Debug($"ApplyMusicKit: {ex.Message}"); }
