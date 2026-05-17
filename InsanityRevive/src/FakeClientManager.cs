@@ -531,9 +531,17 @@ public sealed class FakeClientManager : IDisposable
             { "botId", id }, { "personaId", fc.PersonaId }, { "reason", reason },
             { "name", fc.Name }, { "slot", fc.Slot } });
         try {
+            // Kick the live engine client. `kickid <slot>` works regardless
+            // of m_bFakePlayer state, so it handles the Hider-flipped case
+            // (where `ctrl.IsBot` returns false for our own bots, which the
+            // previous `bot_kick <Name>` path mistakenly gated on). Without
+            // this, the engine keeps the slot occupied even after pool[managed]=0
+            // is written — leading to "phantom team members" in the
+            // scoreboard count (e.g. `5/15` after several
+            // `insanity_kick_bots` + `bot_kick` + `insanity_fleet_size N` cycles).
             var ctrl = Utilities.GetPlayerFromSlot(fc.Slot);
-            if (ctrl != null && ctrl.IsValid && ctrl.IsBot)
-                Server.ExecuteCommand($"bot_kick {fc.Name}");
+            if (ctrl != null && ctrl.IsValid)
+                Server.ExecuteCommand($"kickid {fc.Slot}");
         } catch { }
         // Quota tracks (active+pending) — Despawn drops one, re-assert.
         EnforceBotQuota();
