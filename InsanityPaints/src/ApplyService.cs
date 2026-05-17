@@ -302,8 +302,19 @@ public sealed class ApplyService
 
     /// <summary>Apply the player's selected music kit (MVP anthem +
     /// round-start/end music). Single slot per controller, no team
-    /// dimension. CS2 sets the live music via two fields:
-    /// CCSPlayerController.MusicKitID and InventoryServices.MusicID.</summary>
+    /// dimension. CS2 sets the live music via several fields:
+    ///   - m_iMusicKitID — kit defindex (UI displays the name from this).
+    ///   - InventoryServices.MusicID — same value, mirrored on the
+    ///     inventory side; engine reads both depending on call site.
+    ///   - m_bMvpNoMusic — bool gate. Defaults to true on fake-client
+    ///     slots (Hider-flipped or otherwise), so even with a valid
+    ///     kit ID set, the MVP anthem won't play. Forcing it to false
+    ///     unlocks audio.
+    ///   - m_iMusicKitMVPs — display counter ("0 MVPs with this kit").
+    ///     Not load-bearing for playback but the UI checks this.
+    /// First cut (May 17 morning) wrote only the first two; user
+    /// reported "MVP music shows but doesn't play". Adding
+    /// m_bMvpNoMusic=false and the MVP counter as belt-and-suspenders.</summary>
     private void ApplyMusicKit(CCSPlayerController player, PlayerKind kind)
     {
         int kitId = ChooseMusicKit(player, kind);
@@ -311,8 +322,13 @@ public sealed class ApplyService
         try
         {
             player.MusicKitID = kitId;
-            if (player.InventoryServices != null) player.InventoryServices.MusicID = (ushort)kitId;
+            player.MvpNoMusic = false;
+            if (player.InventoryServices != null)
+            {
+                player.InventoryServices.MusicID = (ushort)kitId;
+            }
             Utilities.SetStateChanged(player, "CCSPlayerController", "m_iMusicKitID");
+            Utilities.SetStateChanged(player, "CCSPlayerController", "m_bMvpNoMusic");
             Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInventoryServices");
         }
         catch (Exception ex) { Log.Debug($"ApplyMusicKit: {ex.Message}"); }
