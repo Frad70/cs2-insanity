@@ -299,19 +299,23 @@ the latest set, preserving image URLs and the `legacy_model` flag.
 
 ## Known issues
 
-- **Animation-system SIGSEGV during mass bot respawn.** Symptom:
-  SIGSEGV in `libanimationsystem.so` → `libserver.so` (pure-native
-  stack) during the FleetManager bot-spawn burst at boot or
-  round-start. Reproduced repeatedly on 2026-05-16 and 2026-05-17.
-  An earlier discriminator (17 rounds without crash on
-  `apply_to_revive_bots: false`) **falsely implicated** Paints' bot
-  apply path — a follow-up run with the same setting crashed within
-  4 minutes, identical stack. So the trigger is **not in Paints**;
-  it lives in the broader stack (`InsanityHider` m_bFakePlayer flip
-  on mass spawn, the AimHook detour on `CCSBot::UpdateLookAngles`,
-  or the FleetManager cascade itself). Narrowing is open — next
-  candidates: unload Hider for a session, then drop FleetSize from
-  8 to 4 to shrink the spawn burst.
+- **Animation-system SIGSEGV during mass bot respawn — FIXED 2026-05-17.**
+  Symptom was SIGSEGV in `libanimationsystem.so` → `libserver.so`
+  (pure-native stack) during FleetManager spawn burst or
+  OnPreResetRound team-swap. Root cause: `Server.NextFrame()` in
+  `OnPlayerSpawn` queued every player's ApplyAll into the same
+  next frame, producing N simultaneous SetModel + SetBodygroup +
+  attribute-list writes into animation system → race.
+  Fix (commit `fc7d2d1`): stagger by slot index —
+  `_plugin.AddTimer(slot * Server.TickInterval, ApplyAll)` —
+  so at most one player's apply runs per tick.
+  Discriminator history:
+  - FleetSize=8, stagger NO → crash within minutes
+  - FleetSize=4, stagger NO → stable (race window narrower)
+  - FleetSize=8, stagger YES → stable (53min+ verified)
+  Cost: skin pop-in is visibly deferred by ~15.6ms per slot index
+  (max ~187ms for slot 12), within the spawn-flicker window so
+  imperceptible.
 - **Hot-reload occasionally leaks ghost bot slots** on the Revive
   side. After a `css_plugins reload InsanityPaints`, the roster can
   grow past `FleetSize` with stale entities. They show up as not
