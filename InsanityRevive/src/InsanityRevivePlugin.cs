@@ -180,7 +180,18 @@ public sealed class InsanityRevivePlugin : BasePlugin
 
     public override void Unload(bool hotReload)
     {
-        try { _manager?.Dispose(); } catch { }
+        // Pass hotReload flag through so OnUnload can skip Despawn'ing
+        // bots when we're going to be reloaded in a moment. Otherwise
+        // the kickid commands queued by Despawn race with the new
+        // instance's AdoptExistingBots() — Despawn clears pool[slot]
+        // synchronously, but kickid is async, so on the new instance's
+        // first scan the engine still has those slots occupied with
+        // Hider-flipped fake-clients that fail the `!IsBot &&
+        // pool.Read==0 → skip` filter. Net effect: stale slots stay
+        // unmanaged ghosts while FleetManager.Reconcile spawns a fresh
+        // 8 alongside (was 8-16 player roster after every reload).
+        // Real shutdown still does full cleanup.
+        try { _manager?.OnUnload(hotReload); } catch { }
         try { _telemetry?.Dispose(); } catch { }
         _manager = null; _telemetry = null;
     }

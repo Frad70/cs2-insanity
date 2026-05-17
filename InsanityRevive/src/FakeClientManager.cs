@@ -259,14 +259,40 @@ public sealed class FakeClientManager : IDisposable
         // candidates. Investigation in progress.
     }
 
-    public void OnUnload()
+    public void OnUnload(bool hotReload = false)
     {
-        foreach (var id in _byId.Keys.ToArray()) Despawn(id, "shutdown");
-        Detour.Uninstall(); _navPatch.Undo();
+        if (!hotReload)
+        {
+            // Real shutdown: kick everyone, full state release.
+            foreach (var id in _byId.Keys.ToArray()) Despawn(id, "shutdown");
+        }
+        // Hot-reload path: skip Despawn — Despawn issues `kickid {slot}`
+        // via the engine command buffer (async) and clears pool[slot]=0
+        // (sync). The async kicks lag the new instance's Load by
+        // hundreds of ms, so AdoptExistingBots() runs *while engine
+        // still holds the stale slots*. Pool says unmanaged + IsBot=false
+        // (Hider flipped) → AdoptExistingBots filters them out → they
+        // float as ghosts until kickid lands. Then FleetManager.Reconcile
+        // has spawned a fresh fleet alongside.
+        // By keeping slots + pool intact across the hot-reload boundary,
+        // the new instance's AdoptExistingBots picks them up cleanly
+        // (pool.Read != 0 + IsBot=false → AdoptController) and no
+        // ghosts accumulate.
+
+        // Detour + nav patch live in libserver memory — they MUST be
+        // uninstalled here regardless of hotReload, because Load() will
+        // re-install on the next instance. Two installed detours on the
+        // same address = chaos.
+        Detour.Uninstall();
+        _navPatch.Undo();
+
         // Defensive save — every mutation already flushes, but a final
-        // pass guards against a race where the last mutation didn't reach
-        // disk before shutdown.
+        // pass guards against a race where the last mutation didn't
+        // reach disk before shutdown / reload.
         _registry.Save();
+
+        // Pool.Close just closes the OS handle; the mmap file persists.
+        // New instance reopens it on Load. Safe either way.
         _pool.Close();
     }
 
